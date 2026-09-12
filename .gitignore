@@ -30,3 +30,8 @@ CMakeUserPresets.json
 *.ilk
 *.so
 *.dylib
+
+# ---- 一次性脚手架 / 临时构建目录 ----
+# 例如临时验证用的 .tmp-build/、.tmp-xxx/，跑完即删，绝不该进仓库
+.tmp*/
+.verify*/
