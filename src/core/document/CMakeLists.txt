@@ -5,6 +5,8 @@ add_library(core_document STATIC
     markdownparser.cpp
     markdowndocument.h
     markdowndocument.cpp
+    markdownhighlighter.h
+    markdownhighlighter.cpp
 )
 
 # 让链接 core_document 的模块能直接 #include "markdownparser.h"

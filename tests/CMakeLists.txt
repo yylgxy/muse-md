@@ -55,10 +55,23 @@ target_link_libraries(test_markdowndocument
 )
 add_test(NAME markdowndocument COMMAND test_markdowndocument)
 
+# ---------------- MarkdownHighlighter 契约测试 ----------------
+# 需要 Qt6::Gui：QTextDocument / QTextLayout / QGuiApplication 都在 Gui 里。
+# 注意这个测试要有 QGuiApplication（不是 QCoreApplication）——QTextDocument 依赖字体。
+add_executable(test_markdownhighlighter
+    test_markdownhighlighter.cpp
+)
+target_link_libraries(test_markdownhighlighter
+    core_document
+    Qt6::Core
+    Qt6::Gui
+)
+add_test(NAME markdownhighlighter COMMAND test_markdownhighlighter)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
