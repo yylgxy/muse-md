@@ -12,6 +12,8 @@ add_library(infrastructure STATIC
     stringutils.cpp
     configmanager.h
     configmanager.cpp
+    database.h
+    database.cpp
 )
 
 # 让链接 infrastructure 的模块能直接 #include "fileutils.h"、"logger.h"……（导出本目录所有头文件）

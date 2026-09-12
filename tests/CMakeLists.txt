@@ -30,10 +30,35 @@ target_link_libraries(test_markdownparser
 )
 add_test(NAME markdownparser COMMAND test_markdownparser)
 
+# ---------------- DataBase 契约测试 ----------------
+# 这个测试必须有 QCoreApplication（Qt 靠它加载 SQL 驱动插件），
+# 运行时还需要 Qt 的 plugins/sqldrivers/qsqlite.dll 能被找到。
+add_executable(test_database
+    test_database.cpp
+)
+target_link_libraries(test_database
+    infrastructure
+    Qt6::Core
+    Qt6::Sql
+)
+add_test(NAME database COMMAND test_database)
+
+# ---------------- MarkdownDocument 契约测试 ----------------
+# 只链接 core_document 就够：FileUtils / Logger 是通过 core_document 的
+# PUBLIC infrastructure 传递过来的。
+add_executable(test_markdowndocument
+    test_markdowndocument.cpp
+)
+target_link_libraries(test_markdowndocument
+    core_document
+    Qt6::Core
+)
+add_test(NAME markdowndocument COMMAND test_markdowndocument)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
