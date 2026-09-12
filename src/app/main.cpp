@@ -1,4 +1,4 @@
-﻿#include "logger.h"
+#include "logger.h"
 #include "mainwindow.h"
 
 #include <QApplication>
@@ -21,6 +21,13 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
     LOG_INFO("主窗口已显示, 尺寸 %1x%2", w.width(), w.height());
+
+    // 命令行可以带一个 .md 路径直接打开：MarkdownEditor.exe D:\notes\a.md
+    // 用 QCoreApplication::arguments() 而不是 argv：Windows 上它能正确解出中文路径
+    const QStringList args = QCoreApplication::arguments();
+    if (args.size() > 1) {
+        w.openFile(args.at(1));
+    }
 
     const int exitCode = a.exec();
     LOG_INFO("事件循环结束, 返回码=%1", exitCode);

@@ -1,0 +1,18 @@
+<!DOCTYPE RCC>
+<!--
+  资源清单：编译期把这些文件打包进 exe（由 rcc 生成 C++ 源码），
+  运行时用 ":/…" 这样的虚拟路径读取，**不依赖 exe 旁边的磁盘文件**。
+
+  用法（C++ 侧）：
+      QFile f(":/html/preview_template.html");
+      f.open(QIODevice::ReadOnly);
+      const QString html = QString::fromUtf8(f.readAll());
+
+  新增资源时：把文件放进本目录下（例如 html/、styles/、icons/），
+  然后在下面的 <qresource> 里加一行 <file>。
+-->
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>html/preview_template.html</file>
+    </qresource>
+</RCC>

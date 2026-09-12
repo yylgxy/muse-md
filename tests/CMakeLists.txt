@@ -68,10 +68,25 @@ target_link_libraries(test_markdownhighlighter
 )
 add_test(NAME markdownhighlighter COMMAND test_markdownhighlighter)
 
+# ---------------- SyncBridge 契约测试 ----------------
+# 两件事：① buildLineMap() 扫出的块数要和**真实渲染出的顶层元素个数**一致；
+#          ② 预览模板（.qrc 资源）是否具备双向同步必需的东西。
+# 因为要读 ":/html/preview_template.html"，所以这里也把 qrc 编进来
+# （顺便验证 .qrc 本身是有效的、文件真的在里面）。
+add_executable(test_syncbridge
+    test_syncbridge.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
+)
+target_link_libraries(test_syncbridge
+    core_document
+    Qt6::Core
+)
+add_test(NAME syncbridge COMMAND test_syncbridge)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )

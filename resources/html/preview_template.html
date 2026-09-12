@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Markdown 预览</title>
+
+<!--
+  预览区（QWebEngineView）的网页外壳。
+
+  它负责三件事：
+    1. 装修：MarkdownParser 只吐出 <h1>…</h1> 这样的"裸标签"，好不好看全靠这段 CSS。
+    2. 通话：引入 Qt 自带的 qwebchannel.js，连上 C++ 注册的 syncBridge 对象。
+    3. 对表：给 #content 的每个顶层子元素挂 data-line（源码行号，1 起算），
+       让"预览里的位置"和"源码里的行"能互相换算。
+
+  ⚠ 行号统一约定：**1 起算**（人类看的第几行），C++ 侧也一样。
+-->
+
+<style>
+  /* ---------- 页面基础 ---------- */
+  body {
+    margin: 0;
+    padding: 28px 36px 60vh;      /* 底部留白：最后一段也能滚到顶部 */
+    background: #ffffff;
+    color: #24292f;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    word-wrap: break-word;
+  }
+
+  /* 正文限宽：别让一行的文字横跨整个屏幕 */
+  #content { max-width: 920px; margin: 0 auto; }
+
+  /* ---------- 标题 ---------- */
+  h1, h2, h3, h4, h5, h6 { font-weight: 600; line-height: 1.3; margin: 1.5em 0 .6em; }
+  h1 { font-size: 1.9em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+  h2 { font-size: 1.45em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+  h3 { font-size: 1.2em; }
+  h4 { font-size: 1.05em; }
+  h5, h6 { font-size: 1em; color: #57606a; }
+  h1:first-child, h2:first-child { margin-top: 0; }
+
+  p { margin: .8em 0; }
+
+  /* ---------- 链接 ---------- */
+  a { color: #0969da; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ---------- 代码 ---------- */
+  code, pre {
+    font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+    font-size: .9em;
+  }
+  code { background: #f6f8fa; padding: .2em .4em; border-radius: 4px; }
+  pre {
+    background: #f6f8fa;
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow: auto;              /* 长行横向滚动，不要撑破版面 */
+  }
+  pre code { background: none; padding: 0; }
+
+  /* ---------- 引用 ---------- */
+  blockquote {
+    margin: .8em 0;
+    padding: 0 1em;
+    color: #57606a;
+    border-left: .25em solid #d0d7de;
+  }
+  blockquote > :first-child { margin-top: 0; }
+  blockquote > :last-child { margin-bottom: 0; }
+
+  /* ---------- 列表（含 GFM 任务列表）---------- */
+  ul, ol { padding-left: 2em; margin: .8em 0; }
+  li + li { margin-top: .2em; }
+  /* md4c 给任务列表项加了 class，去掉项目符号、让复选框顶到行首 */
+  li.task-list-item { list-style: none; margin-left: -1.35em; }
+  input[type="checkbox"] { margin-right: .4em; }
+
+  /* ---------- 表格（GFM）---------- */
+  table { border-collapse: collapse; margin: 1em 0; display: block; overflow: auto; }
+  th, td { border: 1px solid #d0d7de; padding: 6px 13px; }
+  th { background: #f6f8fa; font-weight: 600; }
+  tbody tr:nth-child(2n) { background: #f6f8fa; }
+
+  /* ---------- 其它 ---------- */
+  img { max-width: 100%; }
+  hr { border: 0; border-top: 1px solid #d0d7de; margin: 24px 0; }
+</style>
+
+<!-- Qt 自带的 WebChannel 客户端脚本。
+     注意这个 qrc:/// 路径是 Qt 内置资源，任何页面都能取到，不需要你准备这个文件。 -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+
+<body>
+<div id="content"><!-- 渲染出来的 HTML 会塞进这里 --></div>
+
+<script>
+'use strict';
+
+/* =========================================================================
+   与 C++ 的桥（QWebChannel）
+   -------------------------------------------------------------------------
+   C++ 侧对应的代码（MainWindow::initUi 里）：
+       channel->registerObject("syncBridge", m_bridge);
+   这里的 channel.objects.syncBridge 必须和那个字符串**一模一样**。
+   ========================================================================= */
+let bridge = null;
+
+new QWebChannel(qt.webChannelTransport, function (channel) {
+    bridge = channel.objects.syncBridge;
+    if (!bridge) {
+        console.error('WebChannel: 没有找到 syncBridge 对象（检查 registerObject 的名字）');
+        return;
+    }
+    // C++ 的信号 → 用 JS 的 .connect() 连上。这就是"编辑器滚动 → 预览滚动"。
+    bridge.editorScrolled.connect(function (line) {
+        scrollToLine(line);
+    });
+    console.log('WebChannel 已连接: syncBridge');
+});
+
+/* =========================================================================
+   内容与行号映射
+   ========================================================================= */
+
+/**
+ * 用新的 HTML 替换预览内容，并给每个顶层块挂上源码行号。
+ * @param {string} html    MarkdownParser 渲染出的 HTML 片段
+ * @param {number[]} blockLines  每个顶层块对应的源码行号（1 起算），与 DOM 顺序一一对应
+ */
+function applyContent(html, blockLines) {
+    const content = document.getElementById('content');
+    content.innerHTML = html;
+
+    const children = content.children;
+    const count = Math.min(children.length, blockLines.length);
+
+    for (let i = 0; i < count; i++) {
+        children[i].setAttribute('data-line', blockLines[i]);
+    }
+
+    // 块数对不上时不要静默：这通常意味着 C++ 那边的"块扫描"和 md4c 的解析结果不一致，
+    // 只影响没被标注的那几个块（点击它们会退回到最近一个已标注的块），不会整体错位。
+    if (children.length !== blockLines.length) {
+        console.warn('data-line 数量对不上: DOM=' + children.length + ' 源码=' + blockLines.length
+                     + '，只标注了前 ' + count + ' 个块');
+    }
+}
+
+/**
+ * 滚动预览，让"第 line 行"对应的块出现在顶部附近。
+ * 由 C++ 的 editorScrolled(line) 信号触发，也可以手动调用调试。
+ * @param {number} line 源码行号（1 起算）
+ */
+function scrollToLine(line) {
+    const content = document.getElementById('content');
+    let target = null;
+
+    for (const el of content.children) {
+        const l = parseInt(el.getAttribute('data-line'), 10);
+        if (isNaN(l)) { continue; }
+        if (l <= line) {
+            target = el;          // 取"起始行 <= 目标行"的最后一个块
+        } else {
+            break;                // data-line 是递增的，超过就不用再看了
+        }
+    }
+
+    if (target) {
+        target.scrollIntoView({ block: 'start', behavior: 'auto' });
+    } else {
+        window.scrollTo(0, 0);    // 目标行在第一个块之前（或还没标注）→ 回到顶部
+    }
+}
+
+/**
+ * 反查：屏幕上这个坐标属于源码第几行。
+ * @param {number} x  clientX
+ * @param {number} y  clientY
+ * @returns {number|null} 行号（1 起算）；实在找不到返回 null
+ */
+function getLineAtPosition(x, y) {
+    let el = document.elementFromPoint(x, y);
+    if (!el) {
+        return null;
+    }
+
+    // 先沿着祖先往上找带 data-line 的（正常情况一步就能命中）
+    const content = document.getElementById('content');
+    for (let node = el; node && node !== content; node = node.parentElement) {
+        const line = parseInt(node.getAttribute && node.getAttribute('data-line'), 10);
+        if (!isNaN(line)) {
+            return line;
+        }
+    }
+
+    // 没标注（比如块数对不上时多出来的块）：退回到"前面最近的一个已标注块"，
+    // 这样点击至少能跳到附近，而不是完全没反应
+    let sibling = el;
+    while (sibling && sibling !== content) {
+        for (let prev = sibling.previousElementSibling; prev; prev = prev.previousElementSibling) {
+            const line = parseInt(prev.getAttribute('data-line'), 10);
+            if (!isNaN(line)) {
+                return line;
+            }
+        }
+        sibling = sibling.parentElement;
+    }
+
+    return null;
+}
+
+/* =========================================================================
+   事件：点击预览 → 让 C++ 把编辑器光标跳过去
+   ========================================================================= */
+document.addEventListener('click', function (event) {
+    const line = getLineAtPosition(event.clientX, event.clientY);
+    if (line === null) {
+        return;
+    }
+
+    // 链接先不要真的跳走（否则预览页面就离开这份文档了）。
+    // 以后想让链接打开系统浏览器，可以在 C++ 侧接一个 openLink(url) 方法。
+    if (event.target.closest('a')) {
+        event.preventDefault();
+    }
+
+    if (bridge) {
+        bridge.reportPreviewClick(line);
+    }
+});
+</script>
+</body>
+</html>
