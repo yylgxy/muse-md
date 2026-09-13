@@ -35,3 +35,10 @@ CMakeUserPresets.json
 # 例如临时验证用的 .tmp-build/、.tmp-xxx/，跑完即删，绝不该进仓库
 .tmp*/
 .verify*/
+
+# ---- 已删除、但可能被编辑器里的陈旧标签页写回来的文件 ----
+# src/core/storage/storage_placeholder.cpp 在 6c31c8d 里已经删除（模块有真实源文件了）。
+# 但如果 Qt Creator 里还开着它的标签页，一次"保存"/"全部保存"就会把它重新写到磁盘上，
+# 于是 git status 里总冒出一个未跟踪文件。这里忽略掉它，避免误提交；
+# 真正的解决办法是关掉那个标签页。删掉这一条也没有副作用。
+src/core/storage/storage_placeholder.cpp

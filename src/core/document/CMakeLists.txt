@@ -38,3 +38,7 @@ target_link_libraries(core_document
     PRIVATE
         md4c-html
 )
+# 兜底依赖：改任何头文件都重编本目录的目标。
+# 原因见根 CMakeLists.txt 里 md_editor_force_header_deps_here() 上面的长注释
+#（本机 CMake 抓不到 /showIncludes，依赖表是空的，会出现新旧 ABI 混用的诡异崩溃）。
+md_editor_force_header_deps_here()
