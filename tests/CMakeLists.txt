@@ -83,10 +83,27 @@ target_link_libraries(test_syncbridge
 )
 add_test(NAME syncbridge COMMAND test_syncbridge)
 
+# ---------------- PreviewRenderer 契约测试 ----------------
+# 这个测试**故意不新建任何 QWebEnginePage / QWebEngineView**：真正的页面渲染要 Chromium
+# 运行时（受限环境里起不来）。它测的是三样不需要页面的东西：
+#   ① buildApplyScript()：HTML + 行号表 打包成 JS 时的转义契约
+#   ② baseUrlFromDir()：相对路径图片的基准 URL
+#   ③ updateContent() 的防抖时序（只用 QTimer + 事件循环）
+# 仍然链接 core_document，而 previewrenderer.cpp 引用了 WebEngine 的符号，
+# 所以运行时会把 Qt6WebEngineWidgets.dll 拖进来 —— ctest 的 PATH 已经覆盖。
+add_executable(test_previewrenderer
+    test_previewrenderer.cpp
+)
+target_link_libraries(test_previewrenderer
+    core_document
+    Qt6::Core
+)
+add_test(NAME previewrenderer COMMAND test_previewrenderer)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )

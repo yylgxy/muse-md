@@ -9,6 +9,8 @@ add_library(core_document STATIC
     markdownhighlighter.cpp
     syncbridge.h
     syncbridge.cpp
+    previewrenderer.h
+    previewrenderer.cpp
 )
 
 # 让链接 core_document 的模块能直接 #include "markdownparser.h"
@@ -23,6 +25,9 @@ target_include_directories(core_document PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # PRIVATE = 实现细节，不传递：
 #           md4c 只在 markdownparser.cpp 里用，ui/app 不该也不许 #include <md4c-html.h>。
 #           哪天上层"偷偷"直接用上了 md4c，编译器会拦住它 —— 这正是分层想要的效果。
+#
+# WebEngineWidgets 之所以要 PUBLIC：previewrenderer.h 的接口里有 QWebEngineView /
+# QWebEnginePage 指针，链接本模块的人（ui / app）得能拿到这两个类型。
 target_link_libraries(core_document
     PUBLIC
         infrastructure

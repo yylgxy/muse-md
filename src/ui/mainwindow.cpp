@@ -8,11 +8,8 @@
 
 #include <QAction>
 #include <QDir>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
@@ -23,50 +20,13 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
-#include <QTimer>
 #include <QToolBar>
-#include <QUrl>
-#include <QVariantList>
 #include <QWebChannel>
-#include <QWebEnginePage>
+#include <QWebEnginePage>  // attach() 返回页面，交给 QWebChannel 当父对象（要完整类型才能转 QObject*）
 #include <QWebEngineView>
 
+using markdown_editor::core::document::PreviewRenderer;
 using markdown_editor::core::document::SyncBridge;
-
-namespace {
-
-// 预览刷新的防抖时间（毫秒）。太短会在打字时不断重排、很卡；太长会觉得预览"跟不上"。
-constexpr int kPreviewDebounceMs = 250;
-
-// 预览页里 console.log/warn/error 的输出默认没人看得到。
-// 继承 QWebEnginePage 覆写这个虚函数，把 JS 的日志接到我们自己的 Logger 上 ——
-// 调双向同步时（比如 data-line 数量对不上）这条"从网页里传出来的声音"特别值钱。
-class JsLoggingPage : public QWebEnginePage
-{
-public:
-    explicit JsLoggingPage(QObject *parent) : QWebEnginePage(parent) {}
-
-protected:
-    void javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level,
-                                  const QString &message,
-                                  int lineNumber,
-                                  const QString &sourceId) override
-    {
-        switch (level) {
-        case InfoMessageLevel:
-            LOG_INFO("[JS] %1", message);
-            break;
-        case WarningMessageLevel:
-            LOG_WARN("[JS] %1 (行 %2)", message, lineNumber);
-            break;
-        case ErrorMessageLevel:
-            LOG_ERROR("[JS] %1 (%2:%3)", message, sourceId, lineNumber);
-            break;
-        }
-    }
-};
-
-}  // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -100,8 +60,9 @@ void MainWindow::initUi()
     // 语法高亮挂到编辑器的文档上（QSyntaxHighlighter 会自己接管重绘）
     m_highlighter = new MarkdownHighlighter(ui->editor->document());
 
-    // 换一个 QWebEnginePage 子类：把网页里的 console 输出转发到我们的日志
-    ui->preview->setPage(new JsLoggingPage(ui->preview));
+    // 把预览视图交给渲染管线：它会给 view 换一个"能转发 console 日志"的页面，
+    // 并持有页面、负责模板加载和内容推送（4.1.4）
+    QWebEnginePage *previewPage = m_renderer.attach(ui->preview);
 
     // 左右各占一半（splitter 的初始比例是运行期设置，.ui 里表达不了）
     ui->splitter->setStretchFactor(0, 1);
@@ -111,23 +72,21 @@ void MainWindow::initUi()
     // ---- WebChannel：把 C++ 的同步桥暴露给页面里的 JS ----
     // 名字 "syncBridge" 必须和模板里 channel.objects.syncBridge 完全一致
     m_bridge = new SyncBridge(this);
-    auto *channel = new QWebChannel(ui->preview->page());
+    auto *channel = new QWebChannel(previewPage);
     channel->registerObject(QStringLiteral("syncBridge"), m_bridge);
-    ui->preview->page()->setWebChannel(channel);
+    previewPage->setWebChannel(channel);
 
     // ---- 信号槽接线 ----
     connect(m_bridge, &SyncBridge::previewClicked, this, &MainWindow::onPreviewClicked);
     connect(ui->editor, &QPlainTextEdit::textChanged, this, &MainWindow::onEditorTextChanged);
     connect(ui->editor->verticalScrollBar(), &QScrollBar::valueChanged, this, &MainWindow::onEditorScrolled);
-    connect(ui->preview, &QWebEngineView::loadFinished, this, &MainWindow::onPreviewLoadFinished);
 
-    m_previewTimer = new QTimer(this);
-    m_previewTimer->setSingleShot(true);
-    m_previewTimer->setInterval(kPreviewDebounceMs);
-    connect(m_previewTimer, &QTimer::timeout, this, &MainWindow::refreshPreview);
+    // 内容刚被推给页面 → 页面里的块是新的，滚动位置得重新对齐一次
+    // （以前这行写在 pushContentToPreview() 末尾，现在渲染器不再认识编辑器，改用信号通知）
+    connect(&m_renderer, &PreviewRenderer::contentRendered, this, &MainWindow::onEditorScrolled);
 
-    // 先把预览外壳页面装起来（内容等 loadFinished 之后再推）
-    loadPreviewPage(QString());
+    // 先把预览外壳页面装起来（内容等页面加载完、渲染器自己补推）
+    m_renderer.loadTemplate(QString());
 }
 
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
@@ -191,11 +150,9 @@ bool MainWindow::openFile(const QString &path)
     ui->editor->setPlainText(m_document.getMarkdownText());
     m_document.setModified(false);
 
-    // baseUrl 换成文档所在目录：预览里的相对路径图片靠它才能找到文件
-    loadPreviewPage(QFileInfo(path).absolutePath());
-    if (m_previewReady) {
-        pushContentToPreview();
-    }
+    // baseUrl 换成文档所在目录：预览里的相对路径图片靠它才能找到文件。
+    // 换模板会重新加载页面，加载完成后渲染器会把当前内容补推上去。
+    m_renderer.loadTemplate(QFileInfo(path).absolutePath());
     updateWindowTitle();
 
     LOG_INFO("已打开文档: %1", path);
@@ -254,10 +211,7 @@ void MainWindow::onSaveFileAs()
     }
 
     // 换目录了：baseUrl 要跟着换，否则文档里的相对图片会指错地方
-    loadPreviewPage(QFileInfo(path).absolutePath());
-    if (m_previewReady) {
-        pushContentToPreview();
-    }
+    m_renderer.loadTemplate(QFileInfo(path).absolutePath());
     updateWindowTitle();
 }
 
@@ -268,73 +222,11 @@ void MainWindow::onEditorTextChanged()
     // 把编辑器内容同步进文档模型（置脏 + 让 HTML 缓存失效）
     m_document.setMarkdownText(ui->editor->toPlainText());
 
-    // 防抖：连续敲字时，只在停下来之后渲染一次
-    if (m_previewTimer) {
-        m_previewTimer->start();
-    }
+    // 交给渲染管线。防抖（300ms）在 PreviewRenderer 里，主窗口不再自己管计时器：
+    // 敲字时它会把这次更新一直往后推，停下来之后才真正渲染一次。
+    m_renderer.updateContent(m_document.getMarkdownText());
+
     updateWindowTitle();
-}
-
-void MainWindow::refreshPreview()
-{
-    pushContentToPreview();
-}
-
-void MainWindow::loadPreviewPage(const QString &baseDir)
-{
-    QFile file(QStringLiteral(":/html/preview_template.html"));
-    if (!file.open(QIODevice::ReadOnly)) {
-        LOG_ERROR("预览模板打不开: :/html/preview_template.html（检查 resources.qrc 是否接进目标）");
-        return;
-    }
-
-    m_previewReady = false;  // 页面要重新加载，等 loadFinished 再推内容
-
-    QUrl baseUrl;
-    if (baseDir.isEmpty()) {
-        baseUrl = QUrl(QStringLiteral("about:blank"));
-    } else {
-        const QString dir = baseDir.endsWith(QLatin1Char('/')) ? baseDir : baseDir + QLatin1Char('/');
-        baseUrl = QUrl::fromLocalFile(dir);
-    }
-    ui->preview->setHtml(QString::fromUtf8(file.readAll()), baseUrl);
-}
-
-void MainWindow::onPreviewLoadFinished(bool ok)
-{
-    m_previewReady = ok;
-    if (!ok) {
-        LOG_ERROR("预览页面加载失败");
-        return;
-    }
-    pushContentToPreview();
-}
-
-void MainWindow::pushContentToPreview()
-{
-    if (!m_previewReady) {
-        return;  // 页面还没就绪（JS 里的 bridge 还没连上），等 loadFinished
-    }
-
-    const QString html = m_document.getRenderedHtml();
-    const QList<int> lineMap = SyncBridge::buildLineMap(m_document.getMarkdownText());
-
-    // 用 JSON 把参数"打包"成安全的 JS 字面量：
-    // 直接拼字符串的话，HTML 里的引号、换行、反斜杠都会把 JS 语法弄坏。
-    QVariantList lineVariants;
-    for (int line : lineMap) {
-        lineVariants.append(line);
-    }
-    QJsonArray args;
-    args.append(html);
-    args.append(QJsonArray::fromVariantList(lineVariants));
-
-    const QString script = QStringLiteral("applyContent.apply(null, %1);")
-                               .arg(QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact)));
-    ui->preview->page()->runJavaScript(script);
-
-    // 内容重排后预览会回到顶部，这里顺手跟编辑器的当前顶行对齐
-    onEditorScrolled();
 }
 
 // ============================ 预览 → 编辑器 ============================

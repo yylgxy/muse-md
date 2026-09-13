@@ -4,10 +4,10 @@
 #include <QMainWindow>
 #include <QString>
 
-#include "markdowndocument.h"  // 值成员，需要完整类型
+#include "markdowndocument.h"    // 值成员，需要完整类型
+#include "previewrenderer.h"     // 值成员，需要完整类型
 
 class QAction;
-class QTimer;
 class MarkdownHighlighter;  // 全局命名空间的类（命名空间不统一的遗留）
 
 namespace markdown_editor::core::document {
@@ -30,9 +30,10 @@ QT_END_NAMESPACE
 //                       信号槽接线、WebChannel 注册、防抖、JS 调用、行号换算
 //     .ui 省不掉这些，所以它们留在代码里。
 //
-// 数据流（4.1.3 的核心）：
-//   1) 编辑器改动 → MarkdownDocument（脏标记 + HTML 缓存）→ MarkdownParser 渲染
-//      → runJavaScript 把「HTML + 行号表」推给预览页
+// 数据流（4.1.3 的双向同步 + 4.1.4 的渲染管线）：
+//   1) 编辑器改动 → MarkdownDocument（脏标记 + 缓存）→ PreviewRenderer::updateContent()
+//      → 防抖 300ms → MarkdownParser 渲染 → runJavaScript 把「HTML + 行号表」推给预览页
+//      （4.1.4 之前这段管线直接写在本文件里，现在收进了 PreviewRenderer）
 //   2) 编辑器滚动 → 算出当前顶行 → SyncBridge 发 editorScrolled 信号
 //      → 预览页里的 JS scrollToLine() 跟着滚
 //   3) 预览被点击 → JS 调 SyncBridge::reportPreviewClick(行号)
@@ -58,24 +59,15 @@ private slots:
     void onEditorTextChanged();
     void onEditorScrolled();
     void onPreviewClicked(int line);
-    void onPreviewLoadFinished(bool ok);
-
-    // 防抖到期后真正刷新预览
-    void refreshPreview();
 
 private:
-    // 把 .ui 建好的控件和外部对象（高亮器、同步桥、WebChannel）接起来
+    // 把 .ui 建好的控件和外部对象（高亮器、同步桥、WebChannel、渲染器）接起来
     void initUi();
     // 菜单/工具栏/状态栏：这些用 .ui 表达不了（快捷键、动作、连接都是代码的事），所以留在代码里
     void initMenuBar();
     void initToolBar();
     void initStatusBar();
 
-    // 加载预览"外壳"页面（模板 + baseUrl）。baseDir 是当前文档所在目录：
-    // 文档里的 ![](./img/a.png) 这类相对路径要靠 baseUrl 才能找到磁盘文件。
-    void loadPreviewPage(const QString &baseDir);
-    // 把渲染好的 HTML 和"每个顶层块的行号"推给页面里的 JS
-    void pushContentToPreview();
     void updateWindowTitle();
 
     Ui::MainWindow *ui = nullptr;
@@ -85,8 +77,8 @@ private:
 
     markdown_editor::core::document::MarkdownDocument m_document;  // 文档模型（含 HTML 缓存）
 
-    QTimer *m_previewTimer = nullptr;  // 预览刷新防抖：敲字时别每个字符都重新渲染
-    bool m_previewReady = false;       // 预览页面（和 WebChannel）是否已就绪
+    // 渲染管线：模板加载、页面持有、防抖、渲染、推送（4.1.4）
+    markdown_editor::core::document::PreviewRenderer m_renderer;
 
     QAction *m_openAction = nullptr;
     QAction *m_saveAction = nullptr;
