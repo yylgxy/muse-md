@@ -1,0 +1,32 @@
+# ---- 构建产物（Qt Creator 默认把 build 放在源码树内，必须忽略）----
+build/
+build-*/
+out/
+cmake-build-*/
+
+# ---- CMake 生成物 ----
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# ---- Qt Creator 工程会话文件 ----
+*.user
+*.user.*
+.qtcreator/
+.qtc_clangd/
+CMakeUserPresets.json
+*.autosave
+
+# ---- 编译中间产物 ----
+*.o
+*.obj
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.so
+*.dylib
