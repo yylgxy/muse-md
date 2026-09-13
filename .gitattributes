@@ -1,0 +1,17 @@
+# 行尾策略：仓库里统一用 LF，检出到工作区也用 LF。
+# 不加这个文件的话，Windows 上每次 git 操作都会刷十几行
+# "LF will be replaced by CRLF"，而且同一个文件在不同机器上 diff 会整篇变化。
+* text=auto eol=lf
+
+# 下面这些一律按二进制处理：不做行尾转换，也不做文本 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.exe  binary
+*.dll  binary
+*.lib  binary
+*.obj  binary
+*.pdb  binary
+*.ilk  binary

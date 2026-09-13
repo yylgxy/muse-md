@@ -1,2 +1,107 @@
 # muse-md
-Qt6 C++ 开发的跨平台 Markdown 编辑器，支持实时双向预览、多标签文档管理、文件树、全文检索、HTML/PDF 导出与亮暗主题切换。
+
+**Qt 6 + C++17 写的 Markdown 编辑器，带实时双向预览与本地版本历史。**
+
+A Qt 6 / C++17 Markdown editor with live bidirectional preview and local version history.
+
+> 这是一个边写边学的项目：按分层架构（基础设施 / 核心 / 业务 / 界面）组织，注释写得比较细，
+> 每个模块都配了契约测试。适合当作 Qt Widgets + QtWebEngine + CMake 的阅读材料。
+>
+> 当前进度：文件管理、版本历史、内容缓存已完成（4.2.x）。
+
+---
+
+## 功能
+
+### 已实现
+
+| 分类 | 能力 |
+|---|---|
+| **Markdown 渲染** | 基于 md4c 0.5.3，支持 GFM：表格、任务列表、删除线、裸链接/邮箱自动识别 |
+| **实时预览** | 编辑器停止输入 300ms 后刷新预览（防抖）；HTML 外壳与样式打包在 qrc 里，不依赖外部文件 |
+| **语法高亮** | 标题、粗体/斜体、行内代码、围栏代码块、列表、引用 |
+| **双向同步** | 编辑器滚动 → 预览跟着滚；点击预览 → 编辑器跳到对应源码行（走 QWebChannel） |
+| **文件读写** | 打开 / 保存 / 另存为 / 新建；写入用 QSaveFile 原子替换，写失败不破坏原文件 |
+| **编码处理** | 自动识别 UTF-8、UTF-8 带 BOM、UTF-16 LE/BE、本机编码（中文 Windows = GBK），并按**原编码**写回；目标编码表示不了某个字符时自动改用 UTF-8，不丢字 |
+| **文件状态** | 只读文件提示（能看能改，保存时给出人能看懂的原因）、修改标志（标题栏 `*`）、未保存时在「新建 / 打开 / 关窗口」之前先问一句 |
+| **本地历史** | 每次保存自动在独立仓库里打一个轻量快照（备注带时间戳），可查历史列表、看与上一版的差异、回滚到任意版本（**回滚只改内存**，确认后按 Ctrl+S 才写盘） |
+| **内容缓存** | 基于 QCache 的 LRU 缓存，缓存最近打开的文件内容；带「修改时间 + 大小」过期校验；状态栏显示命中率，可手动清空 |
+| **基础设施** | 统一日志（控制台 + 文件，带文件名与行号）、文件工具、SQLite 元数据模块（已有测试，尚未接入界面） |
+| **测试** | 8 个测试程序、400+ 项检查，`ctest` 一键跑完 |
+
+### 计划中
+
+- 多标签文档管理
+- 文件树 / 工作区
+- 全文检索
+- HTML / PDF 导出
+- 亮暗主题切换
+- 笔记元数据接入界面（标签、搜索、最近打开）
+- 大纲（TOC）导航
+- 图片粘贴与相对路径管理
+- 自动保存
+
+---
+
+## 构建与运行
+
+**依赖**
+
+- Qt **6.5+**，并且要装 **Qt WebEngine** 模块（预览要用）
+- CMake 3.24+
+- **MSVC 2019 / 2022**
+  > 不要用 MinGW：Qt 的 MinGW 套件里没有 `Qt6WebEngineWidgets`，链接会直接失败。
+
+**方式一：Qt Creator（推荐）**
+
+1. 用 Qt Creator 打开根目录的 `CMakeLists.txt`
+2. 选一个 MSVC kit → **Run CMake**
+3. 构建 → 运行
+
+**方式二：命令行**
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+      -DCMAKE_PREFIX_PATH="C:/Qt/6.5.3/msvc2019_64"
+cmake --build build --config Debug
+```
+
+运行测试：
+
+```bash
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+## 代码结构
+
+```
+src/infrastructure/   日志、文件工具、SQLite 元数据
+src/core/document/    文档模型、Markdown 解析、语法高亮、渲染管线、同步桥
+src/core/storage/     文件管理（编码 / 只读 / 修改标志）、版本历史（git 快照）、内容缓存
+src/business/         业务层（预留，暂无代码）
+src/ui/               主窗口与界面（mainwindow.ui + 接线代码）
+src/app/              程序入口
+tests/                各模块的契约测试（ctest）
+third_party/md4c/     Markdown 解析库（MIT）
+resources/            预览页 HTML 模板与 qrc
+```
+
+分层原则：依赖方向单向向下，跨层只通过明确接口；每个模块用 CMake 的 `PUBLIC` / `PRIVATE`
+表达"哪些是接口、哪些是实现细节"。具体约定写在各模块的头文件注释里。
+
+## 数据放在哪
+
+- 日志：`%APPDATA%/Dev/MarkdownEditor/logs/`
+- 版本历史（每个文档一个 git 仓库）：`%APPDATA%/Dev/MarkdownEditor/history/<文档名>-<路径哈希>/`
+- 笔记元数据（SQLite，尚未接入界面）：`%APPDATA%/Dev/MarkdownEditor/`
+
+版本历史**刻意不放在文档所在目录**：那会往笔记目录里塞一个 `.git`；更要紧的是，如果那个目录
+本身已经是个仓库，我们的提交可能把不相干的改动一起带进去。
+
+## 第三方
+
+- [md4c](https://github.com/mity/md4c) 0.5.3 —— Markdown 解析与 HTML 渲染，MIT 许可证，见 `third_party/md4c/LICENSE.md`
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。
