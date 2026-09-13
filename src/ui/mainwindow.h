@@ -8,6 +8,7 @@
 #include "previewrenderer.h"  // 值成员，需要完整类型
 
 class QAction;
+class QLabel;
 class MarkdownHighlighter;  // 全局命名空间的类（命名空间不统一的遗留）
 
 namespace markdown_editor::core::document {
@@ -57,15 +58,23 @@ public:
     // 打开一个 Markdown 文件（main() 用命令行参数调用，将来做文件关联也走这里）
     bool openFile(const QString &path);
 
+protected:
+    // 关窗口前问一句要不要保存（和「新建/打开」用同一套判断，closeEvent 里调 maybeSave()）
+    void closeEvent(QCloseEvent *event) override;
+
 private slots:
     void onNewFile();
     void onOpenFile();
     void onSaveFile();
     void onSaveFileAs();
 
-    // 版本历史（4.2.2）：查历史快照 / 与上一版对比
+    // 版本历史（4.2.2）：查历史快照 / 与上一版对比 / 回滚到历史版本
     void onShowHistory();
     void onDiffWithPrevious();
+    void onRollbackToVersion();
+
+    // 清空内存缓存（4.2.3）
+    void onClearCache();
 
     void onEditorTextChanged();
     void onEditorScrolled();
@@ -95,6 +104,9 @@ private:
 
     void updateWindowTitle();
 
+    // 状态栏右侧那行缓存状态（条数 / 命中次数 / 命中率）
+    void updateCacheStatus();
+
     Ui::MainWindow *ui = nullptr;
 
     MarkdownHighlighter *m_highlighter = nullptr;
@@ -112,6 +124,10 @@ private:
     QAction *m_saveAsAction = nullptr;
     QAction *m_historyAction = nullptr;
     QAction *m_diffAction = nullptr;
+    QAction *m_rollbackAction = nullptr;
+    QAction *m_clearCacheAction = nullptr;
+
+    QLabel *m_cacheLabel = nullptr;  // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
 };
 
 #endif // MAINWINDOW_H

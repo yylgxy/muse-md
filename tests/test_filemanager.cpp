@@ -327,6 +327,11 @@ int main(int argc, char *argv[])
         check(FileManager::isReadOnlyFile(pathRo), QStringLiteral("readonly: 识别出只读属性"));
         check(!FileManager::isReadOnlyFile(work + QStringLiteral("/nope.md")),
               QStringLiteral("readonly: 不存在的文件不算只读"));
+        // 4.2.3 加的 QFileInfo 重载（打开文件时复用已经查好的文件状态，省一次 stat）
+        check(FileManager::isReadOnlyFile(QFileInfo(pathRo)),
+              QStringLiteral("readonly: QFileInfo 重载与路径版本结论一致"));
+        check(FileManager::isReadOnlyFile(QFileInfo(pathRo)) == FileManager::isReadOnlyFile(pathRo),
+              QStringLiteral("readonly: 两个重载对同一个文件答案相同"));
         check(FileManager::writabilityProblem(pathRo).contains(QStringLiteral("只读")),
               QStringLiteral("writabilityProblem: 只读文件给出人话原因"));
         check(FileManager::writabilityProblem(work + QStringLiteral("/ok.md")).isEmpty(),
@@ -514,6 +519,56 @@ int main(int argc, char *argv[])
                         .arg(fromCache, 0, 'f', 3)
                         .toUtf8()
                         .constData());
+    }
+
+    // ============================ 7. 回滚到历史版本（4.2.2）============================
+    // 契约里最要紧的一条：回滚**只改内存、不写盘**，所以它永远是可撤销的。
+    if (VersionControl::isGitAvailable()) {
+        const QString rollbackRoot = work + QStringLiteral("/history-root-rollback");
+        FileManager files;
+        files.versionControl()->setHistoryRoot(rollbackRoot);
+
+        const QString doc = work + QStringLiteral("/rollback-demo.md");
+        FileUtils::writeFileBytes(doc, QStringLiteral("第一版内容\n").toUtf8());
+
+        QString err;
+        check(files.openFile(doc, &err) && files.saveFile(&err), QStringLiteral("回滚: 打开并保存第一版"), err);
+
+        const QString repoDir = files.versionControl()->repositoryPathFor(doc);
+        const QString hash1 = files.versionControl()->history(repoDir, 5, &err).value(0).hash;
+        check(!hash1.isEmpty(), QStringLiteral("回滚: 拿到第一版的哈希"));
+
+        files.setText(QStringLiteral("第二版内容\n"));
+        check(files.saveFile(&err), QStringLiteral("回滚: 保存第二版"), err);
+
+        // ---- 回滚到第一版：内存变了，磁盘不能变 ----
+        check(files.restoreSnapshot(hash1, &err), QStringLiteral("回滚: 回到第一版"), err);
+        check(files.text() == QStringLiteral("第一版内容\n"), QStringLiteral("回滚: ★内容已换回第一版"));
+        check(files.isModified(), QStringLiteral("回滚: 标成已修改（好提醒用户保存）"));
+
+        QByteArray onDisk;
+        FileUtils::readFileBytes(doc, onDisk);
+        check(onDisk == QStringLiteral("第二版内容\n").toUtf8(),
+              QStringLiteral("回滚: ★磁盘没被动过（所以回滚随时可以放弃）"));
+
+        // ---- 用户确认之后保存，磁盘才变 ----
+        check(files.saveFile(&err), QStringLiteral("回滚: 用户确认后保存"), err);
+        FileUtils::readFileBytes(doc, onDisk);
+        check(onDisk == QStringLiteral("第一版内容\n").toUtf8(), QStringLiteral("回滚: 保存后磁盘变成第一版"));
+        check(!files.isModified(), QStringLiteral("回滚: 保存后不再是已修改"));
+
+        // ---- 失败路径：状态一个字节都不能动 ----
+        const QString before = files.text();
+        check(!files.restoreSnapshot(QStringLiteral("不存在的版本"), &err) && !err.isEmpty(),
+              QStringLiteral("回滚: 版本号不存在 → false + 原因"), err);
+        check(files.text() == before, QStringLiteral("回滚: 失败时当前内容一点没变"));
+
+        FileManager fresh;  // 没保存过的新文档
+        fresh.versionControl()->setHistoryRoot(rollbackRoot);
+        check(!fresh.restoreSnapshot(hash1, &err) && !err.isEmpty(),
+              QStringLiteral("回滚: 没保存过的文档 → false + 原因"), err);
+    } else {
+        std::printf("%-58s SKIP  [系统里没找到 git]\n", "回滚到历史版本");
     }
 
     QDir(work).removeRecursively();

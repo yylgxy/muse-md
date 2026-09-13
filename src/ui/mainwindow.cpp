@@ -7,12 +7,14 @@
 #include "syncbridge.h"
 
 #include <QAction>
+#include <QCloseEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
@@ -32,6 +34,7 @@
 
 using markdown_editor::core::document::PreviewRenderer;
 using markdown_editor::core::document::SyncBridge;
+using markdown_editor::core::storage::CacheManager;
 using markdown_editor::core::storage::FileManager;
 using markdown_editor::core::storage::VersionControl;
 
@@ -136,10 +139,18 @@ void MainWindow::initMenuBar()
     m_diffAction = fileMenu->addAction(QStringLiteral("与上一版对比(&D)…"));
     connect(m_diffAction, &QAction::triggered, this, &MainWindow::onDiffWithPrevious);
 
+    m_rollbackAction = fileMenu->addAction(QStringLiteral("回滚到历史版本(&R)…"));
+    connect(m_rollbackAction, &QAction::triggered, this, &MainWindow::onRollbackToVersion);
+
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(QStringLiteral("退出(&Q)"));
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QWidget::close);
+
+    // ---- 工具菜单 ----
+    QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
+    m_clearCacheAction = toolsMenu->addAction(QStringLiteral("清空内存缓存(&C)"));
+    connect(m_clearCacheAction, &QAction::triggered, this, &MainWindow::onClearCache);
 }
 
 void MainWindow::initToolBar()
@@ -163,6 +174,12 @@ void MainWindow::initToolBar()
 void MainWindow::initStatusBar()
 {
     statusBar()->showMessage(QStringLiteral("就绪"));
+
+    // 右侧常驻的缓存状态：这是"第二次打开同一个文件走了缓存"最直观的可见证据。
+    // 用 addPermanentWidget（不会被临时消息顶掉），鼠标悬停能看到完整统计。
+    m_cacheLabel = new QLabel(this);
+    statusBar()->addPermanentWidget(m_cacheLabel);
+    updateCacheStatus();
 }
 
 // ============================ 文件与文档 ============================
@@ -354,6 +371,7 @@ void MainWindow::onFileOpened(const QString &path)
     statusBar()->showMessage(QStringLiteral("已打开：%1（%2）")
                                  .arg(path, FileManager::encodingName(m_files.encoding())));
     updateWindowTitle();
+    updateCacheStatus();  // 命中/未命中次数刚刚变了
 }
 
 void MainWindow::onFileSaved(const QString &path)
@@ -361,6 +379,7 @@ void MainWindow::onFileSaved(const QString &path)
     statusBar()->showMessage(QStringLiteral("已保存：%1（%2）")
                                  .arg(path, FileManager::encodingName(m_files.encoding())));
     updateWindowTitle();
+    updateCacheStatus();  // 保存后缓存里换成了新内容
 }
 
 void MainWindow::onModificationChanged(bool modified)
@@ -500,10 +519,125 @@ void MainWindow::onDiffWithPrevious()
         diffText.isEmpty() ? QStringLiteral("（两个版本的内容完全相同）") : diffText);
 }
 
+// 回滚：把某个历史版本的内容载入编辑器。
+// 刻意"只载入、不写盘"—— 用户看过内容确认没问题再按 Ctrl+S；
+// 不满意直接不保存就行，所以回滚永远是可撤销的。
+void MainWindow::onRollbackToVersion()
+{
+    if (!m_files.hasFilePath()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("回滚到历史版本"),
+                                 QStringLiteral("这个文档还没保存过，没有历史版本可以回滚。"));
+        return;
+    }
+
+    VersionControl *history = m_files.versionControl();
+    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+
+    QString error;
+    const QList<VersionControl::Commit> commits = history->history(repoDir, 50, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("回滚到历史版本"), error);
+        return;
+    }
+    if (commits.isEmpty()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("回滚到历史版本"),
+                                 QStringLiteral("还没有任何快照。\n保存一次（Ctrl+S）就会留下第一份，之后就能回滚了。"));
+        return;
+    }
+
+    QStringList items;
+    for (const VersionControl::Commit &commit : commits) {
+        items << QStringLiteral("%1  %2  %3")
+                     .arg(commit.shortHash,
+                          commit.time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                          commit.message);
+    }
+
+    bool accepted = false;
+    const QString chosen = QInputDialog::getItem(
+        this,
+        QStringLiteral("回滚到历史版本 — %1").arg(m_files.fileName()),
+        QStringLiteral("选一个版本，它的内容会载入编辑器。\n"
+                       "注意：**不会立刻写盘** —— 看过之后按 Ctrl+S 才保存；\n"
+                       "不满意直接不做任何保存即可（当前内容不会被破坏）。"),
+        items,
+        0,      // 默认选中最新那条
+        false,  // 不可编辑（只能从列表里选）
+        &accepted);
+    if (!accepted || chosen.isEmpty()) {
+        return;
+    }
+
+    const int index = items.indexOf(chosen);
+    if (index < 0 || index >= commits.size()) {
+        return;
+    }
+    const VersionControl::Commit picked = commits.at(index);
+
+    QString restoreError;
+    if (!m_files.restoreSnapshot(picked.hash, &restoreError)) {
+        QMessageBox::warning(this, QStringLiteral("回滚失败"), restoreError);
+        return;
+    }
+
+    // 内容同步到编辑器和预览。
+    // 注意 setPlainText 会触发 textChanged → setText(同样的内容) → 返回 false，
+    // 所以预览要显式推一次（和打开文件时同样的道理）。
+    ui->editor->setPlainText(m_files.text());
+    m_renderer.updateContent(m_files.text());
+    updateWindowTitle();
+    updateCacheStatus();
+
+    statusBar()->showMessage(QStringLiteral("已回滚到 %1（内容尚未写盘，按 Ctrl+S 保存）").arg(picked.shortHash));
+}
+
+// ============================ 缓存（4.2.3）============================
+
+void MainWindow::onClearCache()
+{
+    m_files.cacheManager()->clear();
+    statusBar()->showMessage(QStringLiteral("已清空内存缓存（下次打开文件会重新读盘）"));
+    updateCacheStatus();
+}
+
+void MainWindow::updateCacheStatus()
+{
+    if (m_cacheLabel == nullptr) {
+        return;
+    }
+
+    const CacheManager *cache = m_files.cacheManager();
+    const qint64 lookups = cache->hits() + cache->misses() + cache->staleCount();
+    const double hitRate = lookups > 0 ? (100.0 * double(cache->hits()) / double(lookups)) : 0.0;
+
+    m_cacheLabel->setText(QStringLiteral("缓存 %1/%2 条 · 命中 %3/%4（%5%）")
+                              .arg(cache->size())
+                              .arg(cache->maxEntries())
+                              .arg(cache->hits())
+                              .arg(lookups)
+                              .arg(hitRate, 0, 'f', 0));
+    // 鼠标悬停看完整统计（CacheManager 已经提供了一行可读文本）
+    m_cacheLabel->setToolTip(cache->statisticsText());
+}
+
 // ============================ 其它 ============================
 
 void MainWindow::updateWindowTitle()
 {
     setWindowTitle(QStringLiteral("%1%2 - Markdown 编辑器")
                        .arg(m_files.isModified() ? QStringLiteral("*") : QString(), m_files.fileName()));
+}
+
+// 关窗口：有未保存的修改就先问一句。
+// 和「新建 / 打开」共用 maybeSave()，保证三处的行为完全一致 ——
+// 少这一处的话，用户点右上角关闭就会把没保存的内容丢掉（原来就是这样）。
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (maybeSave()) {
+        event->accept();
+    } else {
+        event->ignore();  // 用户选了取消：窗口不关，继续编辑
+    }
 }

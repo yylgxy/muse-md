@@ -398,4 +398,33 @@ QString VersionControl::diffWithParent(const QString &repoDir, const QString &re
     return diff(repoDir, base, rev, error);
 }
 
+QString VersionControl::contentOf(const QString &repoDir, const QString &rev, QString *error) const
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (!isRepository(repoDir)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("还不是快照仓库：%1").arg(repoDir);
+        }
+        return QString();
+    }
+    if (rev.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("没有指定版本");
+        }
+        return QString();
+    }
+
+    // <rev>:<路径> 是 git 的"对象说明"语法：直接取那个提交里这个文件的内容。
+    // 注意不要用 "git show <rev>"（那会连提交信息、diff 一起打出来）。
+    const QString objectRef = QStringLiteral("%1:%2").arg(rev, snapshotFileName());
+
+    QString out;
+    if (!runGit(repoDir, QStringList{QStringLiteral("show"), objectRef}, &out, error)) {
+        return QString();
+    }
+    return out;
+}
+
 }  // namespace markdown_editor::core::storage

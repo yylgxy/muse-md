@@ -118,6 +118,12 @@ public:
     // 第一个提交没有父提交：此时与 git 的"空树"比较，得到"全部是新增"的 diff。
     QString diffWithParent(const QString &repoDir, const QString &rev, QString *error = nullptr) const;
 
+    // 取某个版本里保存的**完整内容**（就是那一版的 snapshot.md 内容），回滚功能用它。
+    // 成功：返回内容。**返回空字符串也可能是成功** —— 那一版就是个空文档，
+    //       所以判断成败要看 error 是否为空（同 commitSnapshot 的约定）。
+    // 失败：返回空 + error（版本号不存在、仓库不存在……）。
+    QString contentOf(const QString &repoDir, const QString &rev, QString *error = nullptr) const;
+
 signals:
     // 新建了一个快照
     void snapshotCreated(const QString &repoDir, const QString &hash, const QString &message);

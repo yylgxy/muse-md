@@ -43,7 +43,7 @@ bool FileManager::openFile(const QString &path, QString *error)
         switch (m_cache.lookup(path, info, &cached)) {
         case CacheManager::LookupResult::Hit:
             // 命中：不读盘、不解码，直接用内存里的内容
-            applyOpenedContent(path, cached.text, cached.encoding);
+            applyOpenedContent(path, info, cached.text, cached.encoding);
             LOG_INFO("已打开(命中缓存): %1（编码 %2，%3 字符，耗时 %4 ms）",
                      path,
                      encodingName(cached.encoding),
@@ -71,7 +71,7 @@ bool FileManager::openFile(const QString &path, QString *error)
     const Encoding detected = detectEncoding(raw);
     const QString content = decode(raw, detected);
 
-    applyOpenedContent(path, content, detected);
+    applyOpenedContent(path, info, content, detected);
     LOG_INFO("已打开: %1（编码 %2，%3 字节，耗时 %4 ms）",
              path,
              encodingName(detected),
@@ -87,10 +87,15 @@ bool FileManager::openFile(const QString &path, QString *error)
 // 把"打开成功"这件事一次性落地：状态 + 信号。
 // 读盘命中和缓存命中两条路径共用它，是为了保证两者的行为完全一致 ——
 // 否则很容易写出"走缓存时忘了清脏标志"这类只在特定路径复现的 bug。
-void FileManager::applyOpenedContent(const QString &path, const QString &content, Encoding encoding)
+void FileManager::applyOpenedContent(const QString &path,
+                                     const QFileInfo &info,
+                                     const QString &content,
+                                     Encoding encoding)
 {
     m_encoding = encoding;
-    m_readOnly = isReadOnlyFile(path);
+    // 复用上面已经查好的 info：打开一个文件本来就要 stat 一次（判缓存是否过期），
+    // 判只读再查第二遍是白花钱 —— 这台机器上一次 stat 大约几百微秒，比读缓存本身还贵。
+    m_readOnly = isReadOnlyFile(info);
 
     m_document.setMarkdownText(content);
     m_document.setFilePath(path);
@@ -266,6 +271,48 @@ VersionControl *FileManager::versionControl()
 const VersionControl *FileManager::versionControl() const
 {
     return &m_history;
+}
+
+bool FileManager::restoreSnapshot(const QString &rev, QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+
+    if (m_document.getFilePath().isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("这个文档还没保存过，没有历史版本可以回滚");
+        }
+        return false;
+    }
+
+    const QString repoDir = m_history.repositoryPathFor(m_document.getFilePath());
+
+    // 先把内容取到手，再动状态：取失败时当前编辑内容一个字符都不该丢
+    //（"内容为空但没报错" = 那一版就是空文档，是正常结果）。
+    QString historyError;
+    const QString content = m_history.contentOf(repoDir, rev, &historyError);
+    if (!historyError.isEmpty()) {
+        if (error != nullptr) {
+            *error = historyError;
+        }
+        LOG_ERROR("回滚失败: %1（%2）", rev.left(7), historyError);
+        return false;
+    }
+
+    if (content == m_document.getMarkdownText()) {
+        LOG_INFO("回滚: %1 的内容与当前完全相同，什么都没变", rev.left(7));
+        return true;
+    }
+
+    // 刻意只改内存、不写磁盘：用户看到内容、确认没问题之后再按 Ctrl+S。
+    // 这样"回滚"永远是可撤销的（不满意就不保存）。
+    m_document.setMarkdownText(content);
+    m_document.setModified(true);
+    emit modificationChanged(true);
+
+    LOG_INFO("已回滚到 %1（内容已载入编辑器，尚未写盘，等用户保存）", rev.left(7));
+    return true;
 }
 
 void FileManager::setAutoSnapshotEnabled(bool enabled)
@@ -572,7 +619,11 @@ QByteArray FileManager::encode(const QString &text, Encoding encoding, Encoding 
 
 bool FileManager::isReadOnlyFile(const QString &path)
 {
-    const QFileInfo info(path);
+    return isReadOnlyFile(QFileInfo(path));
+}
+
+bool FileManager::isReadOnlyFile(const QFileInfo &info)
+{
     // 不存在的文件不算只读（"新建 / 另存为"要写的就是不存在的文件）
     return info.exists() && !info.isWritable();
 }

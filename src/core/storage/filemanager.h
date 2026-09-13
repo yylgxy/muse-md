@@ -120,6 +120,10 @@ public:
     // 文件存在且带只读属性（或没有写权限）→ true。文件不存在 → false（新文件不算只读）。
     static bool isReadOnlyFile(const QString &path);
 
+    // 同上，但复用调用方已经查好的 QFileInfo：打开文件时本来就要查一次文件状态
+    //（判断缓存是否过期、看文件在不在），再查第二遍纯属浪费 —— 每次 stat 在这台机器上要几百微秒。
+    static bool isReadOnlyFile(const QFileInfo &info);
+
     // 能不能往这个路径写？返回空字符串 = 可以；否则返回一句可以直接展示给用户的原因。
     // 检查三件事：路径是不是目录、文件是不是只读、所在目录有没有写权限
     //（QSaveFile 是在目标目录里先写临时文件再改名，所以目录也必须可写）。
@@ -137,6 +141,14 @@ public:
     // 关掉它的场景：用户明确不想留历史、或者不希望在磁盘上多出东西。
     void setAutoSnapshotEnabled(bool enabled);
     bool autoSnapshotEnabled() const;
+
+    // 回滚：把某个历史版本的内容取回来放进文档。
+    // **不写磁盘** —— 内容只是载入内存并把文档标成"已修改"，由用户看过之后决定要不要 Ctrl+S。
+    // 这么设计是有意的：直接覆盖文件会让"回滚"变成不可撤销的破坏性操作，
+    // 而能撤销它的东西恰恰就是版本历史本身。
+    // 成功：true，文档内容已换成那一版（modificationChanged 会在真的变了时发出来）。
+    // 失败：false + error，**文档状态一个字节都不动**（版本号不存在、还没保存过、没有历史……）。
+    bool restoreSnapshot(const QString &rev, QString *error = nullptr);
 
     // ============================ 缓存（4.2.3）============================
 
@@ -166,7 +178,8 @@ private:
 
     // 把"打开成功"这件事一次性落到状态里（编码、只读、文档内容、脏标志）。
     // 读盘命中和缓存命中两条路径共用它，保证两条路径的状态变化一模一样。
-    void applyOpenedContent(const QString &path, const QString &content, Encoding encoding);
+    // info 是调用方已经查好的文件状态（顺便省掉一次 stat）。
+    void applyOpenedContent(const QString &path, const QFileInfo &info, const QString &content, Encoding encoding);
 
     // 把刚读到的内容放进缓存（会按文件当前的修改时间/大小记下"新鲜度"）。
     void rememberInCache(const QString &path, const QString &content, Encoding encoding, qint64 fileSize);

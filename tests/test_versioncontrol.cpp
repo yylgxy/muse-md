@@ -167,6 +167,28 @@ int main(int argc, char *argv[])
               QStringLiteral("diffWithParent: 第一个提交与空树比 → 全部算新增"));
     }
 
+    // ---------------- 取某个版本的完整内容（回滚功能的基础）----------------
+    {
+        const QString content1 = vc.contentOf(repoDir, hash1, &err);
+        check(err.isEmpty() && content1 == v1, QStringLiteral("contentOf: 取回第一版的完整内容"));
+
+        const QString content2 = vc.contentOf(repoDir, hash2, &err);
+        check(err.isEmpty() && content2 == v2, QStringLiteral("contentOf: 取回第二版的完整内容"));
+        check(content1 != content2, QStringLiteral("contentOf: 两版内容确实不同"));
+
+        // 空文档那一版：返回空字符串但**不报错**（空 != 失败，这条约定回滚功能要靠它）
+        const QString emptyHash = vc.commitSnapshot(repoDir, QString(), QStringLiteral("空文档"), &err);
+        check(!emptyHash.isEmpty(), QStringLiteral("contentOf: 能提交空文档作为一版"), err);
+        const QString emptyContent = vc.contentOf(repoDir, emptyHash, &err);
+        check(emptyContent.isEmpty() && err.isEmpty(),
+              QStringLiteral("contentOf: 那一版是空文档 → 返回空且不报错"));
+
+        check(vc.contentOf(repoDir, QStringLiteral("不存在的版本"), &err).isEmpty() && !err.isEmpty(),
+              QStringLiteral("contentOf: 版本号不存在 → 空 + 原因"), err);
+        check(vc.contentOf(repoDir, QString(), &err).isEmpty() && !err.isEmpty(),
+              QStringLiteral("contentOf: 没给版本 → 空 + 原因"));
+    }
+
     // ---------------- 失败路径（必须给出人能看懂的原因）----------------
     check(vc.diff(repoDir, QStringLiteral("不存在的版本"), hash2, &err).isEmpty() && !err.isEmpty(),
           QStringLiteral("diff: 版本号不存在 → 空 + 原因"), err);
