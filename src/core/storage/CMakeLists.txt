@@ -3,6 +3,8 @@
 add_library(core_storage STATIC
     filemanager.h
     filemanager.cpp
+    versioncontrol.h
+    versioncontrol.cpp
 )
 
 # 让链接 core_storage 的模块能直接 #include "filemanager.h"

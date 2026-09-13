@@ -115,10 +115,24 @@ target_link_libraries(test_filemanager
 )
 add_test(NAME filemanager COMMAND test_filemanager)
 
+# ---------------- VersionControl 契约测试 ----------------
+# 这个测试会**真的调用系统 git**（QProcess）：初始化仓库、提交快照、查历史、比差异。
+# 机器上没有 git 时它打印 SKIP 并返回 0 —— Git 没装不是本项目代码的问题，
+# 不该让整个测试套挂掉。仓库根目录用 setHistoryRoot() 指到临时目录，不碰 AppData 里的真实历史。
+add_executable(test_versioncontrol
+    test_versioncontrol.cpp
+)
+target_link_libraries(test_versioncontrol
+    core_storage
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME versioncontrol COMMAND test_versioncontrol)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )

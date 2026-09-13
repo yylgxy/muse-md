@@ -13,6 +13,7 @@
 
 #include "filemanager.h"
 #include "fileutils.h"
+#include "versioncontrol.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -25,6 +26,7 @@
 #include <cstdio>
 
 using markdown_editor::core::storage::FileManager;
+using markdown_editor::core::storage::VersionControl;
 
 namespace {
 
@@ -365,6 +367,66 @@ int main(int argc, char *argv[])
         QFile::setPermissions(pathRo,
                               QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadUser
                                   | QFileDevice::WriteUser);
+    }
+
+    // ============================ 5. 保存时自动打快照（4.2.2 集成）============================
+    // 这里验证的是"两个模块接在一起对不对"：保存一次 → 留下一条历史；改内容再存 → 又一条。
+    // 需要机器上有 git；没有就跳过（这不是本项目代码的问题）。
+    if (VersionControl::isGitAvailable()) {
+        const QString histRoot = work + QStringLiteral("/history-root");
+        FileManager files;
+        // 把快照仓库指到临时目录，绝不动 AppData 里那份真实历史
+        files.versionControl()->setHistoryRoot(histRoot);
+
+        const QString doc = work + QStringLiteral("/snapshot-demo.md");
+        FileUtils::writeFileBytes(doc, QStringLiteral("第一版\n").toUtf8());
+
+        QString err;
+        check(files.openFile(doc, &err), QStringLiteral("自动快照: 打开文档"), err);
+        check(files.saveFile(&err), QStringLiteral("自动快照: 第一次保存"), err);
+
+        const QString repoDir = files.versionControl()->repositoryPathFor(doc);
+        const auto historyMessages = [&files, &repoDir]() {
+            QString listErr;
+            const QList<VersionControl::Commit> commits = files.versionControl()->history(repoDir, 20, &listErr);
+            QStringList out;
+            for (const VersionControl::Commit &commit : commits) {
+                out << commit.message;
+            }
+            return out;
+        };
+
+        QStringList messages = historyMessages();
+        check(messages.size() == 1, QStringLiteral("自动快照: 保存一次就有 1 条历史"),
+              QStringLiteral("%1 条").arg(messages.size()));
+        check(!messages.isEmpty() && messages.first().startsWith(QStringLiteral("保存快照 ")),
+              QStringLiteral("自动快照: 备注带时间戳"), messages.value(0));
+
+        files.setText(QStringLiteral("第二版\n"));
+        check(files.saveFile(&err), QStringLiteral("自动快照: 改内容后再保存"), err);
+        check(historyMessages().size() == 2, QStringLiteral("自动快照: 变成 2 条历史（每次保存一条）"));
+
+        // 关掉自动快照后不该再增加
+        files.setAutoSnapshotEnabled(false);
+        files.setText(QStringLiteral("第三版\n"));
+        files.saveFile(&err);
+        check(historyMessages().size() == 2, QStringLiteral("自动快照: 关掉之后保存不再产生历史"));
+        files.setAutoSnapshotEnabled(true);
+
+        // 注意这里的分界：快照比的是"相对**上一个快照**有没有变化"，不是"相对上一次保存"。
+        // 刚才那次保存是在关掉开关时做的，所以内容还没进历史 —— 重新打开开关后再保存，
+        // 会正常补上一次提交（这是对的）。
+        check(files.saveFile(&err), QStringLiteral("自动快照: 重新打开开关后保存"), err);
+        const int afterCatchUp = historyMessages().size();
+        check(afterCatchUp == 3, QStringLiteral("自动快照: 补上关掉期间漏掉的那一版"),
+              QStringLiteral("%1 条").arg(afterCatchUp));
+
+        // 真正的"内容没变"：连着保存两次，第二次不该新增
+        check(files.saveFile(&err), QStringLiteral("自动快照: 重复保存同一内容仍算保存成功"), err);
+        check(historyMessages().size() == afterCatchUp,
+              QStringLiteral("自动快照: 内容没变 -> 不新增历史"));
+    } else {
+        std::printf("%-58s SKIP  [系统里没找到 git]\n", "自动快照: 保存时创建历史");
     }
 
     QDir(work).removeRecursively();

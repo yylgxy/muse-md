@@ -63,6 +63,10 @@ private slots:
     void onSaveFile();
     void onSaveFileAs();
 
+    // 版本历史（4.2.2）：查历史快照 / 与上一版对比
+    void onShowHistory();
+    void onDiffWithPrevious();
+
     void onEditorTextChanged();
     void onEditorScrolled();
     void onPreviewClicked(int line);
@@ -85,6 +89,10 @@ private:
     // 返回 false = 用户取消，调用方必须**中止**当前操作，否则就把没保存的内容丢了。
     bool maybeSave();
 
+    // 一个只读的文本窗口：历史列表和版本差异都用它显示
+    // （差异可能几百行，需要等宽字体、不折行、可选可复制，QMessageBox 不够用）
+    void showTextDialog(const QString &title, const QString &header, const QString &body);
+
     void updateWindowTitle();
 
     Ui::MainWindow *ui = nullptr;
@@ -102,6 +110,8 @@ private:
     QAction *m_openAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
+    QAction *m_historyAction = nullptr;
+    QAction *m_diffAction = nullptr;
 };
 
 #endif // MAINWINDOW_H

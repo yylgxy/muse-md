@@ -7,10 +7,14 @@
 #include "syncbridge.h"
 
 #include <QAction>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QKeySequence>
+#include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -21,6 +25,7 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QToolBar>
+#include <QVBoxLayout>
 #include <QWebChannel>
 #include <QWebEnginePage>  // attach() 返回页面，交给 QWebChannel 当父对象（要完整类型才能转 QObject*）
 #include <QWebEngineView>
@@ -28,6 +33,7 @@
 using markdown_editor::core::document::PreviewRenderer;
 using markdown_editor::core::document::SyncBridge;
 using markdown_editor::core::storage::FileManager;
+using markdown_editor::core::storage::VersionControl;
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -119,6 +125,16 @@ void MainWindow::initMenuBar()
     m_saveAsAction = fileMenu->addAction(QStringLiteral("另存为(&A)…"));
     m_saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(m_saveAsAction, &QAction::triggered, this, &MainWindow::onSaveFileAs);
+
+    // ---- 版本历史（4.2.2 的轻量快照）----
+    // 快照是保存时自动打的，这里只负责"看"：查历史列表、和上一版比差异
+    fileMenu->addSeparator();
+
+    m_historyAction = fileMenu->addAction(QStringLiteral("版本历史(&H)…"));
+    connect(m_historyAction, &QAction::triggered, this, &MainWindow::onShowHistory);
+
+    m_diffAction = fileMenu->addAction(QStringLiteral("与上一版对比(&D)…"));
+    connect(m_diffAction, &QAction::triggered, this, &MainWindow::onDiffWithPrevious);
 
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(QStringLiteral("退出(&Q)"));
@@ -359,6 +375,129 @@ void MainWindow::onReadOnlyDetected(const QString &path, const QString &reason)
 {
     LOG_WARN("只读文件: %1", path);
     QMessageBox::warning(this, QStringLiteral("文件是只读的"), reason);
+}
+
+// ============================ 版本历史（4.2.2）============================
+//
+// 快照在保存时由 FileManager 自动打（见 FileManager::snapshotAfterSave），
+// 这里只做两件"看"的事：列历史、比差异。服务本身不弹窗，弹什么、怎么排版是界面的事。
+
+// 一个只读文本窗口：历史列表和差异都用它显示。
+// 为什么不直接用 QMessageBox：差异可能几百行，需要等宽字体、不自动折行、可选可复制、好滚动。
+void MainWindow::showTextDialog(const QString &title, const QString &header, const QString &body)
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    dialog.resize(900, 600);
+
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *headerLabel = new QLabel(header, &dialog);
+    headerLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);  // 仓库路径要能复制出来
+    headerLabel->setWordWrap(true);
+    layout->addWidget(headerLabel);
+
+    auto *view = new QPlainTextEdit(&dialog);
+    view->setReadOnly(true);
+    view->setLineWrapMode(QPlainTextEdit::NoWrap);
+    view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    view->setPlainText(body);
+    layout->addWidget(view, 1);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    dialog.exec();
+}
+
+void MainWindow::onShowHistory()
+{
+    if (!m_files.hasFilePath()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("版本历史"),
+                                 QStringLiteral("这个文档还没保存过。\n保存一次（Ctrl+S）就会留下第一份快照。"));
+        return;
+    }
+
+    VersionControl *history = m_files.versionControl();
+    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+
+    QString error;
+    const QList<VersionControl::Commit> commits = history->history(repoDir, 50, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("版本历史"), error);
+        return;
+    }
+
+    if (commits.isEmpty()) {
+        showTextDialog(
+            QStringLiteral("版本历史"),
+            QStringLiteral("还没有快照。按 Ctrl+S 保存一次就会有第一份。\n快照仓库：%1").arg(repoDir),
+            QStringLiteral("（每次保存都会留下一条，最新的显示在最上面）"));
+        return;
+    }
+
+    QStringList lines;
+    for (const VersionControl::Commit &commit : commits) {
+        lines << QStringLiteral("%1  %2  %3")
+                     .arg(commit.shortHash,
+                          commit.time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                          commit.message);
+    }
+
+    showTextDialog(QStringLiteral("版本历史 — %1").arg(m_files.fileName()),
+                   QStringLiteral("共 %1 个快照（最新的在最上面）\n快照仓库：%2\n"
+                                  "想用命令行看：cd 进上面这个目录，然后 git log / git diff")
+                       .arg(commits.size())
+                       .arg(repoDir),
+                   lines.join(QLatin1Char('\n')));
+}
+
+void MainWindow::onDiffWithPrevious()
+{
+    if (!m_files.hasFilePath()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("与上一版对比"),
+                                 QStringLiteral("这个文档还没保存过，没有可对比的版本。"));
+        return;
+    }
+
+    VersionControl *history = m_files.versionControl();
+    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+
+    QString error;
+    const QList<VersionControl::Commit> commits = history->history(repoDir, 2, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("与上一版对比"), error);
+        return;
+    }
+    if (commits.size() < 2) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("与上一版对比"),
+            QStringLiteral("目前只有 %1 个快照，还没有可对比的上一版。\n改点内容再保存一次就有了。")
+                .arg(commits.size()));
+        return;
+    }
+
+    const VersionControl::Commit newest = commits.at(0);
+    const VersionControl::Commit previous = commits.at(1);
+
+    const QString diffText = history->diff(repoDir, previous.hash, newest.hash, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("与上一版对比"), error);
+        return;
+    }
+
+    showTextDialog(
+        QStringLiteral("与上一版对比 — %1").arg(m_files.fileName()),
+        QStringLiteral("%1（%2） → %3（%4）\n- 开头是上一版的内容，+ 开头是这一版新增的内容")
+            .arg(previous.shortHash,
+                 previous.time.toString(QStringLiteral("MM-dd HH:mm:ss")),
+                 newest.shortHash,
+                 newest.time.toString(QStringLiteral("MM-dd HH:mm:ss"))),
+        diffText.isEmpty() ? QStringLiteral("（两个版本的内容完全相同）") : diffText);
 }
 
 // ============================ 其它 ============================

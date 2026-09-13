@@ -7,6 +7,7 @@
 #include <QString>
 
 #include "markdowndocument.h"  // 值成员，需要完整类型
+#include "versioncontrol.h"    // 值成员，需要完整类型
 
 namespace markdown_editor::core::storage {
 
@@ -18,6 +19,7 @@ namespace markdown_editor::core::storage {
 //     并按**原来的编码**写回去 —— 用记事本存过的 GBK 文档，在别的程序里打开不会突然变乱码
 //   * 只读文件：打开时检测只读属性，发信号让 UI 提示；保存时提前拦下来并给出可读的原因
 //   * 修改标志：内容真的变了才置脏（"输入又删掉"不算），保存/打开后清掉，变化时发信号
+//   * 保存成功后自动打一个**轻量快照**（4.2.2，本地历史）—— 见 snapshotAfterSave()
 //
 // 它**不**负责什么（这些是别的层的事）：
 //   * 不弹任何对话框。只读提示、保存失败提示都是 UI 的事 —— 本类只把"原因"通过信号/出参给出。
@@ -128,6 +130,18 @@ public:
     // 目录本身还不存在时不报错 —— FileUtils 会自动创建父目录，真失败再由它给出原因。
     static QString writabilityProblem(const QString &path);
 
+    // ============================ 版本控制（4.2.2）============================
+
+    // 本文件管理器内嵌的版本控制服务：查历史、看差异都通过它。
+    // 它的快照仓库位置、是否启用自动快照也都由这里统一管，UI 不用自己拼路径。
+    VersionControl *versionControl();
+    const VersionControl *versionControl() const;
+
+    // 保存成功后要不要自动打快照（默认 **开启**）。
+    // 关掉它的场景：用户明确不想留历史、或者不希望在磁盘上多出东西。
+    void setAutoSnapshotEnabled(bool enabled);
+    bool autoSnapshotEnabled() const;
+
 signals:
     // 文件已成功打开（内容已经进文档、脏标志已清）
     void fileOpened(const QString &path);
@@ -145,6 +159,11 @@ private:
     // saveFile / saveFileAs 共用的落地动作：可写性检查 → 按当前编码编码 → 原子写 → 更新状态 → 发信号
     bool writeTo(const QString &path, QString *error);
 
+    // 保存成功之后自动打快照（4.2.2）。
+    // 约定：**任何失败都不影响"保存成功"这个结论** —— 没装 git、仓库建不起来、
+    // 提交失败，全都只写一条日志。用户按 Ctrl+S 的目的是保存文件，不是维护历史。
+    void snapshotAfterSave();
+
     // 严格的 UTF-8 校验（RFC 3629）。detectEncoding 靠它区分"UTF-8"和"本机编码"。
     // 为什么不用 Qt 的解码器：QStringDecoder 遇到坏字节只塞一个 U+FFFD 替代字符，
     // 默认标志下 hasError() **不会**变 true —— 实测把 GBK 字节喂给它，hasError() 仍然是 false，
@@ -153,6 +172,8 @@ private:
 
     markdown_editor::core::document::MarkdownDocument m_document;  // 内容 + 路径 + 脏标志 + HTML 缓存
 
+    VersionControl m_history;      // 轻量快照（4.2.2），仓库位置由它自己决定
+    bool m_autoSnapshot = true;    // 保存后自动打快照
     Encoding m_encoding = Encoding::Utf8;  // 当前文档的编码（打开时检测，保存时按它写回）
     bool m_readOnly = false;               // 当前文件是否只读
 };

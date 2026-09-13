@@ -144,7 +144,70 @@ bool FileManager::writeTo(const QString &path, QString *error)
     emit fileSaved(path);
 
     LOG_INFO("已保存: %1（编码 %2，%3 字节）", path, encodingName(m_encoding), bytes.size());
+
+    // 保存成功之后再打快照。顺序有讲究：先把 fileSaved 发出去（界面立刻更新成"已保存"），
+    // 再做可能要多花几十毫秒的 git 操作，用户不会觉得保存卡。
+    snapshotAfterSave();
     return true;
+}
+
+// ============================ 版本控制（4.2.2）============================
+
+void FileManager::snapshotAfterSave()
+{
+    if (!m_autoSnapshot || m_document.getFilePath().isEmpty()) {
+        return;
+    }
+
+    if (!VersionControl::isGitAvailable()) {
+        // 没装 git 不是"保存失败"，只提示一次就够（用 WARN 让它在日志里显眼）
+        LOG_WARN("系统里没有找到 git，这次保存没有留下快照（装好 Git 并加入 PATH 后会自动开始记录）");
+        return;
+    }
+
+    const QString repoDir = m_history.repositoryPathFor(m_document.getFilePath());
+
+    QString error;
+    if (!m_history.isRepository(repoDir) && !m_history.initRepository(repoDir, &error)) {
+        LOG_WARN("建快照仓库失败（不影响保存）: %1", error);
+        return;
+    }
+
+    // 备注带时间戳（4.2.2 的要求），这类备注在 git log 里一眼能看出是自动快照
+    const QString hash =
+        m_history.commitSnapshot(repoDir, m_document.getMarkdownText(), VersionControl::defaultSnapshotMessage(), &error);
+
+    if (hash.isEmpty()) {
+        if (error.isEmpty()) {
+            // 内容与上一版完全一样（比如打开后没改就按了 Ctrl+S）
+            LOG_INFO("快照: 内容与上一版相同，没有新建提交");
+        } else {
+            LOG_WARN("打快照失败（不影响保存）: %1", error);
+        }
+        return;
+    }
+
+    LOG_INFO("快照成功: %1 已记录到 %2", hash.left(7), repoDir);
+}
+
+VersionControl *FileManager::versionControl()
+{
+    return &m_history;
+}
+
+const VersionControl *FileManager::versionControl() const
+{
+    return &m_history;
+}
+
+void FileManager::setAutoSnapshotEnabled(bool enabled)
+{
+    m_autoSnapshot = enabled;
+}
+
+bool FileManager::autoSnapshotEnabled() const
+{
+    return m_autoSnapshot;
 }
 
 // ============================ 内容与状态 ============================
