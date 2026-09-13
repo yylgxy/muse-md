@@ -210,6 +210,17 @@ FileManager::Encoding FileManager::encoding() const
     return m_encoding;
 }
 
+QDateTime FileManager::createdTime() const
+{
+    // 路径为空时 QFileInfo("").birthTime() 就是无效时间，调用方用 isValid() 判断即可
+    return QFileInfo(m_document.getFilePath()).birthTime();
+}
+
+QDateTime FileManager::modifiedTime() const
+{
+    return QFileInfo(m_document.getFilePath()).lastModified();
+}
+
 QString FileManager::encodingName(Encoding encoding)
 {
     switch (encoding) {

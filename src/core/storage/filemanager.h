@@ -2,6 +2,7 @@
 #define FILEMANAGER_H
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QObject>
 #include <QString>
 
@@ -23,10 +24,11 @@ namespace markdown_editor::core::storage {
 //     这样它在没有窗口的环境里也能跑（测试、将来的命令行模式都靠这条）。
 //   * 不管编辑器控件：编辑器的内容通过 setText() 灌进来，之后由本类保管。
 //
-// 与 MarkdownDocument 的分工：
-//   内容、磁盘路径、脏标志、HTML 缓存都在 MarkdownDocument 里（一个成员，唯一事实来源），
-//   本类在它外面加上"编码 + 只读 + 信号 + 四个操作"这些**文件层面**的语义。
+// 与 MarkdownDocument 的分工（4.2.1 之后收窄过，边界很清楚）：
+//   MarkdownDocument = **纯内存状态**：内容 + 路径 + 脏标志，一行磁盘代码都没有；
+//   本类            = 一切"文件层面"的事：读 / 写、编码、只读、文件时间戳、四个操作、对外信号。
 //   所以不要在别处再存一份路径或脏标志 —— 那会变成两个事实来源，迟早不一致。
+//   渲染也不在这里：Markdown → HTML 由 PreviewRenderer 调 MarkdownParser 完成（那条管线带防抖）。
 //
 // 分层注记：本类在 core/storage（持久化层），依赖 core/document（要驱动 MarkdownDocument）和
 // infrastructure（FileUtils）。core/storage 的 CMake 里 core_document 是 PUBLIC 链接的
@@ -92,6 +94,13 @@ public:
     Encoding encoding() const;  // 当前文档的编码（决定保存时怎么写）
 
     static QString encodingName(Encoding encoding);  // 给人看的名字，进日志和提示语
+
+    // 文件的创建 / 最后修改时间（每次都查一次磁盘）。
+    // 路径为空或文件不存在时返回**无效**的 QDateTime —— 用 isValid() 判断后再显示。
+    // 放在这里而不是 MarkdownDocument 里：这属于"文件层面"的信息（要碰磁盘），
+    // 文档模型那边保持纯内存。
+    QDateTime createdTime() const;
+    QDateTime modifiedTime() const;
 
     // ============================ 编码（纯函数）============================
     // 三个都是 static 且不碰文件系统，所以能脱离磁盘单独测。

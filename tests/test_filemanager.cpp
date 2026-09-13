@@ -292,6 +292,25 @@ int main(int argc, char *argv[])
         }
     }
 
+    // ============================ 3b. 文件时间戳 ============================
+    // （4.2.1 从 MarkdownDocument 搬过来的：这属于"文件层面"的信息，要碰磁盘）
+    {
+        FileManager files;
+        check(!files.modifiedTime().isValid() && !files.createdTime().isValid(),
+              QStringLiteral("时间戳: 没有路径时是无效时间（用 isValid 判断）"));
+
+        const QString stamped = work + QStringLiteral("/times.md");
+        FileUtils::writeFileBytes(stamped, QByteArray("x"));
+
+        QString err;
+        check(files.openFile(stamped, &err), QStringLiteral("时间戳: 打开文件"), err);
+        check(files.modifiedTime().isValid(), QStringLiteral("时间戳: 文件存在 -> modifiedTime 有效"));
+        check(files.createdTime().isValid(), QStringLiteral("时间戳: 文件存在 -> createdTime 有效"));
+
+        files.newFile();
+        check(!files.modifiedTime().isValid(), QStringLiteral("时间戳: newFile 之后又变成无效"));
+    }
+
     // ============================ 4. 只读文件 ============================
     {
         const QString pathRo = work + QStringLiteral("/readonly.md");

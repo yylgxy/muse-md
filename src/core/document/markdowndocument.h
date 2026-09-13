@@ -1,48 +1,37 @@
 #ifndef MARKDOWNDOCUMENT_H
 #define MARKDOWNDOCUMENT_H
 
-#include <QDateTime>
 #include <QString>
 
 namespace markdown_editor::core::document {
 
-// 一个 Markdown 文档的内存模型：内容 + 磁盘路径 + 脏标记 + HTML 缓存。
+// 一个 Markdown 文档的**内存状态**：内容 + 磁盘路径 + 脏标记。
 //
-// 三件事的分工（这也是分层的意义）：
-//   * 渲染本身交给 MarkdownParser —— 它是**静态工具类、无状态**，所以这里不需要
-//     持有它的对象，直接 MarkdownParser::parseToHtml(...) 调用即可（不用 new、不用 delete）。
-//     （两个类在同一个命名空间里，所以这里不用写限定名。）
-//   * 文件读写交给 FileUtils（统一处理 UTF-8 / BOM / 错误信息），本类只关心文档语义。
-//   * 本类不碰 UI：m_isModified 只是"提醒 UI 该问用户要不要保存"，弹窗是 ui 层的事。
+// 边界（4.2.1 之后收窄过，这条线很重要）：本类是**纯内存**的，一行磁盘代码都没有。
+//   * 读盘 / 写盘 / 编码检测 / 只读判断 / 文件时间戳 → core/storage 的 FileManager
+//     （那边处理 UTF-8 与 GBK、BOM、原子替换、权限，这些都不是"文档"该关心的事）
+//   * Markdown → HTML                                → PreviewRenderer 调 MarkdownParser
+//     （那边有 300ms 防抖，缓存也应该跟着数据流走，而不是在这里再存一份）
 //
-// HTML 缓存策略：md 内容变时才置脏，真正需要 HTML 时才重新解析（惰性 + 缓存）。
-// 注意缓存粒度是**整篇**：UI 做实时预览时要加防抖，否则每敲一个字就全量解析一次。
+// 为什么要把这些移出去：同一个职责有两份实现时，两份迟早会不一致 ——
+// 之前这里有一套"只认 UTF-8"的读写、FileManager 有一套认编码的，谁该调用哪套全靠记性；
+// 这里还缓存过 HTML，而预览走的是另一条渲染路径，缓存等于白算。
+// 现在的原则很简单：**一个职责只有一条路径**。
+//
+// 剩下的三件事都是"不碰外部世界"的纯状态：
+//   * setMarkdownText() 只在内容**真的变了**时置脏（"输入又删掉"不该算已修改）
+//   * 脏标记只是"提醒 UI 该问用户要不要保存"，弹窗是 ui 层的事，这里不弹
+//   * 路径为空 = 还没保存过的新文档
 class MarkdownDocument
 {
 public:
-    // 从磁盘加载（UTF-8，自动剥离 BOM）。
-    // 成功：true，并把状态重置为"未修改"。
-    // 失败：false，**对象状态完全不变**（原来的内容和路径都还在），原因写进日志。
-    bool loadFromFile(const QString &filePath);
-
-    // 另存到指定路径（成功后内部路径也切过去，即"另存为"语义）。
-    // 失败：false，内部状态不变（不会把路径改成写不进去的那个）。
-    bool saveToFile(const QString &filePath);
-
-    // 保存到当前路径（相当于 Ctrl+S）。
-    // 还没有路径的新文档返回 false —— 这时应该由 UI 去弹「另存为」。
-    bool save();
-
-    // 设置原始 Markdown 文本。内容与当前完全相同时不置脏
-    // （避免"在编辑器里点了一下、输入又删掉"就被判成已修改）。
+    // 设置原始 Markdown 文本。
+    // 内容与当前**完全相同**时直接返回：既不置脏、也不清脏 ——
+    // "内容没变"是中性事件，不能顺手改状态（清脏是 setModified(false) 的职责）。
     void setMarkdownText(const QString &mdText);
 
     // 原始 Markdown 文本
     QString getMarkdownText() const;
-
-    // 渲染后的 HTML（内部走 MarkdownParser）。
-    // 非 const 是有意的：第一次调用会填充缓存，之后 md 没变就直接返回缓存。
-    QString getRenderedHtml();
 
     void setFilePath(const QString &path);
     QString getFilePath() const;
@@ -51,17 +40,10 @@ public:
     bool isModified() const;
     void setModified(bool flag);
 
-    // 文件时间（每次都查一次磁盘）。
-    // 注意：路径为空或文件不存在时返回的是**无效**的 QDateTime，用 isValid() 判断再显示。
-    QDateTime getCreateTime() const;
-    QDateTime getModifyTime() const;
-
 private:
     QString m_filePath;         // md 文件本地路径（空 = 还没保存过的新文档）
     QString m_mdContent;        // 原始 markdown 文本
-    QString m_htmlContent;      // 渲染结果的缓存
     bool m_isModified = false;  // 是否有未保存的修改
-    bool m_htmlDirty = true;    // md 变过、HTML 缓存已失效
 };
 
 }  // namespace markdown_editor::core::document

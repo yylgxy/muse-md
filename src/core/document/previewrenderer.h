@@ -32,10 +32,10 @@ namespace markdown_editor::core::document {
 //                     滚动位置对齐（预览重排后要不要跟着编辑器滚，是窗口的决策）
 //   * 本类**不**碰 QPlainTextEdit：它只知道"给我一段 Markdown"，不知道内容从哪来
 //
-// 渲染用 MarkdownParser（和别处同一个渲染服务），不读 MarkdownDocument 里的 HTML 缓存：
+// 渲染用 MarkdownParser（和别处同一个渲染服务），不读 MarkdownDocument 里的缓存 ——
 // 本类的契约只是"给我一段 Markdown"，它不需要认识文档模型。
-// 代价是 MarkdownDocument::getRenderedHtml() 现在应用里没人调用了（预览不再走它）——
-// 那份缓存留着给别的消费者（比如将来的"导出 HTML"），测试也还在覆盖它。
+// （4.2.1 之后 MarkdownDocument 里那份 HTML 缓存已经删掉了：预览走这条管线，
+//   缓存放在数据流之外等于白算；一条渲染路径比两条好维护。）
 //
 // 关于开销与 WebEngine 依赖：本类会构造 QWebEnginePage，所以链接它的人等于依赖
 // Qt6::WebEngineWidgets（core_document 已经 PUBLIC 链接了）。为此把两个纯函数
