@@ -27,6 +27,7 @@
 
 using markdown_editor::core::document::PreviewRenderer;
 using markdown_editor::core::document::SyncBridge;
+using markdown_editor::core::storage::FileManager;
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -85,6 +86,13 @@ void MainWindow::initUi()
     // （以前这行写在 pushContentToPreview() 末尾，现在渲染器不再认识编辑器，改用信号通知）
     connect(&m_renderer, &PreviewRenderer::contentRendered, this, &MainWindow::onEditorScrolled);
 
+    // ---- 文件管理器的信号：文件层面的变化 → 界面提示 ----
+    // 主窗口不认识"编码/只读/脏标志"这些细节，只负责把管理器的结论显示出来：
+    connect(&m_files, &FileManager::fileOpened, this, &MainWindow::onFileOpened);
+    connect(&m_files, &FileManager::fileSaved, this, &MainWindow::onFileSaved);
+    connect(&m_files, &FileManager::modificationChanged, this, &MainWindow::onModificationChanged);
+    connect(&m_files, &FileManager::readOnlyDetected, this, &MainWindow::onReadOnlyDetected);
+
     // 先把预览外壳页面装起来（内容等页面加载完、渲染器自己补推）
     m_renderer.loadTemplate(QString());
 }
@@ -95,6 +103,10 @@ void MainWindow::initUi()
 void MainWindow::initMenuBar()
 {
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
+
+    m_newAction = fileMenu->addAction(QStringLiteral("新建(&N)"));
+    m_newAction->setShortcut(QKeySequence::New);
+    connect(m_newAction, &QAction::triggered, this, &MainWindow::onNewFile);
 
     m_openAction = fileMenu->addAction(QStringLiteral("打开(&O)…"));
     m_openAction->setShortcut(QKeySequence::Open);
@@ -118,6 +130,9 @@ void MainWindow::initToolBar()
 {
     QToolBar *toolBar = addToolBar(QStringLiteral("主工具栏"));
     toolBar->setMovable(false);
+    if (m_newAction) {
+        toolBar->addAction(m_newAction);
+    }
     if (m_openAction) {
         toolBar->addAction(m_openAction);
     }
@@ -138,32 +153,76 @@ void MainWindow::initStatusBar()
 
 bool MainWindow::openFile(const QString &path)
 {
-    if (!m_document.loadFromFile(path)) {
-        QMessageBox::warning(this,
-                             QStringLiteral("打开失败"),
-                             QStringLiteral("打不开这个文件，具体原因见日志：\n%1").arg(path));
+    // 读盘、判编码、解码、记住路径和只读状态，全在 FileManager 里完成。
+    QString error;
+    if (!m_files.openFile(path, &error)) {
+        // 失败原因由管理器给出（打不开 / 是文件夹 / 没有权限…），主窗口只负责显示
+        QMessageBox::warning(this, QStringLiteral("打开失败"), QStringLiteral("%1\n\n%2").arg(error, path));
         return false;
     }
 
     // 编辑器显示文档内容。setPlainText 会触发 textChanged → onEditorTextChanged
-    // → m_document.setMarkdownText(同样的内容) → 内容没变，所以不会置脏 ✓
-    ui->editor->setPlainText(m_document.getMarkdownText());
-    m_document.setModified(false);
+    // → m_files.setText(同样的内容) → 内容没变，所以不会置脏 ✓
+    ui->editor->setPlainText(m_files.text());
 
-    // baseUrl 换成文档所在目录：预览里的相对路径图片靠它才能找到文件。
-    // 换模板会重新加载页面，加载完成后渲染器会把当前内容补推上去。
+    // 预览那边两件事，顺序不能反：
+    //   ① 告诉渲染器"要显示的是这段内容"（它会记住，等页面就绪后再推）
+    //   ② 换 baseUrl 到文档所在目录 —— 文档里的相对图片靠它才找得到
+    m_renderer.updateContent(m_files.text());
     m_renderer.loadTemplate(QFileInfo(path).absolutePath());
-    updateWindowTitle();
 
-    LOG_INFO("已打开文档: %1", path);
+    // 标题栏的更新交给 fileOpened 信号（onFileOpened）
     return true;
+}
+
+void MainWindow::onNewFile()
+{
+    if (!maybeSave()) {
+        return;  // 用户按了取消：什么都别做，不能把没保存的内容丢掉
+    }
+
+    m_files.newFile();    // 清空内容、丢掉路径、清掉脏标志、编码回到 UTF-8
+    ui->editor->clear();  // 编辑器跟着清空
+
+    // 预览也回到"没有文档"的状态：baseUrl 变回 about:blank，内容清空
+    m_renderer.updateContent(m_files.text());
+    m_renderer.loadTemplate(QString());
+}
+
+// 有未保存的修改时先问一句。返回 false = 用户取消，调用方必须中止当前操作。
+bool MainWindow::maybeSave()
+{
+    if (!m_files.isModified()) {
+        return true;
+    }
+
+    const QMessageBox::StandardButton answer =
+        QMessageBox::warning(this,
+                             QStringLiteral("有未保存的修改"),
+                             QStringLiteral("「%1」有未保存的修改，要先保存吗？").arg(m_files.fileName()),
+                             QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                             QMessageBox::Save);
+
+    if (answer == QMessageBox::Cancel) {
+        return false;
+    }
+    if (answer == QMessageBox::Discard) {
+        return true;
+    }
+
+    onSaveFile();                  // 新文档没有路径时，它自己会转去「另存为」
+    return !m_files.isModified();  // 保存失败、或用户取消了另存为 → 别继续往下丢内容
 }
 
 void MainWindow::onOpenFile()
 {
-    const QString startDir = m_document.getFilePath().isEmpty()
+    if (!maybeSave()) {
+        return;
+    }
+
+    const QString startDir = m_files.filePath().isEmpty()
                                  ? QDir::homePath()
-                                 : QFileInfo(m_document.getFilePath()).absolutePath();
+                                 : QFileInfo(m_files.filePath()).absolutePath();
     const QString path = QFileDialog::getOpenFileName(
         this,
         QStringLiteral("打开 Markdown 文件"),
@@ -176,24 +235,26 @@ void MainWindow::onOpenFile()
 
 void MainWindow::onSaveFile()
 {
-    m_document.setMarkdownText(ui->editor->toPlainText());  // 保证模型里是最新内容
+    // 保证管理器里是最新内容（正常打字时 setText 已经同步过，这里是保险）
+    m_files.setText(ui->editor->toPlainText());
 
-    if (m_document.getFilePath().isEmpty()) {
+    if (!m_files.hasFilePath()) {
         onSaveFileAs();  // 新文档还没有路径 → 走另存为
         return;
     }
-    if (!m_document.save()) {
-        QMessageBox::warning(this,
-                             QStringLiteral("保存失败"),
-                             QStringLiteral("保存失败，具体原因见日志：\n%1").arg(m_document.getFilePath()));
+
+    QString error;
+    if (!m_files.saveFile(&error)) {
+        // 失败原因由管理器给出（只读 / 没有写权限 / 文件被占用…）。
+        // 注意：失败时脏标志仍然是 true，界面上的 * 不会被去掉。
+        QMessageBox::warning(this, QStringLiteral("保存失败"), error);
     }
-    updateWindowTitle();
+    // 成功的话，标题栏和状态栏由 fileSaved 信号更新
 }
 
 void MainWindow::onSaveFileAs()
 {
-    const QString startPath =
-        m_document.getFilePath().isEmpty() ? QDir::homePath() : m_document.getFilePath();
+    const QString startPath = m_files.filePath().isEmpty() ? QDir::homePath() : m_files.filePath();
     const QString path = QFileDialog::getSaveFileName(this,
                                                       QStringLiteral("另存为"),
                                                       startPath,
@@ -202,29 +263,31 @@ void MainWindow::onSaveFileAs()
         return;
     }
 
-    m_document.setMarkdownText(ui->editor->toPlainText());
-    if (!m_document.saveToFile(path)) {
-        QMessageBox::warning(this,
-                             QStringLiteral("保存失败"),
-                             QStringLiteral("保存失败，具体原因见日志：\n%1").arg(path));
+    m_files.setText(ui->editor->toPlainText());
+
+    QString error;
+    if (!m_files.saveFileAs(path, &error)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), error);
         return;
     }
 
     // 换目录了：baseUrl 要跟着换，否则文档里的相对图片会指错地方
     m_renderer.loadTemplate(QFileInfo(path).absolutePath());
-    updateWindowTitle();
 }
 
 // ============================ 编辑器 → 预览 ============================
 
 void MainWindow::onEditorTextChanged()
 {
-    // 把编辑器内容同步进文档模型（置脏 + 让 HTML 缓存失效）
-    m_document.setMarkdownText(ui->editor->toPlainText());
+    // 内容真的变了才继续往下走：setText() 在"内容没变"时返回 false
+    // （例如打开文件时 setPlainText 带来的那一次 textChanged，以及 newFile 之后的清空）
+    if (!m_files.setText(ui->editor->toPlainText())) {
+        return;
+    }
 
     // 交给渲染管线。防抖（300ms）在 PreviewRenderer 里，主窗口不再自己管计时器：
     // 敲字时它会把这次更新一直往后推，停下来之后才真正渲染一次。
-    m_renderer.updateContent(m_document.getMarkdownText());
+    m_renderer.updateContent(m_files.text());
 
     updateWindowTitle();
 }
@@ -265,13 +328,43 @@ void MainWindow::onEditorScrolled()
     }
 }
 
+// ============================ 文件管理器的结论 → 界面 ============================
+//
+// FileManager 不弹任何对话框（那样它就没法在无窗口的环境里跑了），
+// 只把结论和原因发出来；弹窗、状态栏、标题栏这些"界面表达"全在这里。
+
+void MainWindow::onFileOpened(const QString &path)
+{
+    statusBar()->showMessage(QStringLiteral("已打开：%1（%2）")
+                                 .arg(path, FileManager::encodingName(m_files.encoding())));
+    updateWindowTitle();
+}
+
+void MainWindow::onFileSaved(const QString &path)
+{
+    statusBar()->showMessage(QStringLiteral("已保存：%1（%2）")
+                                 .arg(path, FileManager::encodingName(m_files.encoding())));
+    updateWindowTitle();
+}
+
+void MainWindow::onModificationChanged(bool modified)
+{
+    // 标题栏的 * 就靠这里。注意：保存成功时先发 modificationChanged(false)、
+    // 再发 fileSaved(path)，所以最后停在状态栏上的是"已保存"这条。
+    updateWindowTitle();
+    statusBar()->showMessage(modified ? QStringLiteral("有未保存的修改") : QStringLiteral("已保存到磁盘"));
+}
+
+void MainWindow::onReadOnlyDetected(const QString &path, const QString &reason)
+{
+    LOG_WARN("只读文件: %1", path);
+    QMessageBox::warning(this, QStringLiteral("文件是只读的"), reason);
+}
+
 // ============================ 其它 ============================
 
 void MainWindow::updateWindowTitle()
 {
-    const QString name = m_document.getFilePath().isEmpty()
-                             ? QStringLiteral("未命名")
-                             : QFileInfo(m_document.getFilePath()).fileName();
     setWindowTitle(QStringLiteral("%1%2 - Markdown 编辑器")
-                       .arg(m_document.isModified() ? QStringLiteral("*") : QString(), name));
+                       .arg(m_files.isModified() ? QStringLiteral("*") : QString(), m_files.fileName()));
 }

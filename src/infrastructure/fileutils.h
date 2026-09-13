@@ -1,6 +1,7 @@
 #ifndef FILEUTILS_H
 #define FILEUTILS_H
 
+#include <QByteArray>
 #include <QString>
 
 // 文件读写工具。
@@ -31,6 +32,19 @@ public:
     //       （实现用 QSaveFile：先写临时文件，commit() 成功才替换，避免写一半崩溃/断电把用户文档毁掉）。
     // 失败情形：无写权限 / 文件被其他程序独占 / 磁盘已满 / 路径不合法。
     static bool writeFile(const QString &path, const QString &content, QString *error = nullptr);
+
+    // 读取文件的**原始字节**：不做任何编码假设，也不剥 BOM。
+    //
+    // 为什么要单独有一个：readFile() 是无条件按 UTF-8 解码的，所以 GBK 的老文档读进来会变乱码。
+    // 想"先看字节、再决定用什么编码解码"的场景（FileManager 的编码检测）必须用这个函数。
+    // 成功：返回 true，bytes 为文件全部原始内容（空文件 → 空 QByteArray，仍然算成功）。
+    // 失败：返回 false，bytes 不会被修改；error 非 nullptr 时写入原因（成功时清空）。
+    static bool readFileBytes(const QString &path, QByteArray &bytes, QString *error = nullptr);
+
+    // 覆盖写入**原始字节**：不写 BOM、不做编码转换、不转换换行符。
+    // 与 writeFile() 相比只少了 "QString → UTF-8" 这一步，其余保证完全一样（同一个 QSaveFile 实现）：
+    // 覆盖而非追加、父目录自动创建、提交成功才替换原文件（失败时原文件一个字节都不动）。
+    static bool writeFileBytes(const QString &path, const QByteArray &bytes, QString *error = nullptr);
 
     // 判断路径是否存在（文件或目录都算存在）。
     // 注意：只回答"在不在"，不代表可读或可写；想区分文件还是目录，请另外加 isFile()/isDir()。

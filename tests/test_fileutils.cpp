@@ -146,6 +146,48 @@ int main()
     ok = FileUtils::writeFile(work + "/afile/child.md", QStringLiteral("x"), &err);
     check(!ok, "writeFile: parent path is a file -> false (no crash)");
 
+    // ---------------- readFileBytes / writeFileBytes（4.2.1 新增的字节级 API）----------------
+    // 和文本级的差别只有"不做编码假设"：字节原样进出、BOM 不剥。
+    // 存在的理由：readFile() 无条件按 UTF-8 解码，GBK 老文档会乱码，
+    // 所以"先拿字节、再决定怎么解码"的场景（FileManager 的编码检测）需要这两个函数。
+    const QByteArray bomSample("\xEF\xBB\xBFhello");
+    err.clear();
+    ok = FileUtils::writeFileBytes(work + "/bytes.md", bomSample, &err);
+    check(ok, "writeFileBytes: writes raw bytes", err);
+
+    QByteArray rawBytes;
+    err.clear();
+    ok = FileUtils::readFileBytes(work + "/bytes.md", rawBytes, &err);
+    check(ok && rawBytes == bomSample, "readFileBytes: BOM kept (no decoding)",
+          QStringLiteral("%1B").arg(rawBytes.size()));
+
+    QString textViaBom;
+    FileUtils::readFile(work + "/bytes.md", textViaBom, &err);
+    check(textViaBom == QStringLiteral("hello"), "readFile: still strips BOM (text API unchanged)");
+
+    const QByteArray localBytes = QStringLiteral("中文内容").toLocal8Bit();
+    FileUtils::writeFileBytes(work + "/bytes2.md", localBytes, &err);
+    rawBytes.clear();
+    FileUtils::readFileBytes(work + "/bytes2.md", rawBytes, &err);
+    check(rawBytes == localBytes, "readFileBytes: byte-exact round trip",
+          QStringLiteral("%1B").arg(rawBytes.size()));
+
+    // 字节级版本的失败路径同样不能碰出参
+    err.clear();
+    rawBytes = QByteArray("SENTINEL");
+    ok = FileUtils::readFileBytes(work, rawBytes, &err);
+    check(!ok && rawBytes == QByteArray("SENTINEL"), "readFileBytes: directory -> false, out untouched");
+    check(!err.isEmpty(), "readFileBytes: error message set on failure");
+
+    rawBytes = QByteArray("SENTINEL");
+    err.clear();
+    ok = FileUtils::readFileBytes(work + "/missing2.md", rawBytes, &err);
+    check(!ok && rawBytes == QByteArray("SENTINEL"), "readFileBytes: missing -> false, out untouched");
+
+    err = QStringLiteral("STALE");
+    FileUtils::writeFileBytes(work + "/bytes3.md", QByteArray("abc"), &err);
+    check(err.isEmpty(), "writeFileBytes: error cleared on success");
+
     // ---------------- writeFile：失败时不能破坏原文件（QSaveFile 的意义）----------------
     const QString readOnly = work + "/readonly.md";
     writeRaw(readOnly, QByteArray("ORIGINAL"));

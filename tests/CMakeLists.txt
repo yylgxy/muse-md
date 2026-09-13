@@ -100,10 +100,25 @@ target_link_libraries(test_previewrenderer
 )
 add_test(NAME previewrenderer COMMAND test_previewrenderer)
 
+# ---------------- FileManager 契约测试 ----------------
+# 这个测试会**真的读写磁盘**（临时目录 md-editor-filemanager-test/）：
+# 编码检测/转换、四个操作、只读文件、修改标志、以及"保存后磁盘内容真的变了"。
+# 链接 core_storage（FileManager）+ infrastructure（FileUtils，测试里用原始字节造样本）；
+# core_document 是通过 core_storage 的 PUBLIC 链接传递过来的（filemanager.h 里要用 MarkdownDocument）。
+add_executable(test_filemanager
+    test_filemanager.cpp
+)
+target_link_libraries(test_filemanager
+    core_storage
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME filemanager COMMAND test_filemanager)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
