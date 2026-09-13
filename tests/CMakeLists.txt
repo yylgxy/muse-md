@@ -129,10 +129,23 @@ target_link_libraries(test_versioncontrol
 )
 add_test(NAME versioncontrol COMMAND test_versioncontrol)
 
+# ---------------- CacheManager 契约测试 ----------------
+# 只测内存里的缓存逻辑（不碰 git），但需要临时文件来验证"过期判断"（磁盘状态变了要返回 Stale）。
+# CacheManager 不是 QObject，没有信号，所以不需要 moc。
+add_executable(test_cachemanager
+    test_cachemanager.cpp
+)
+target_link_libraries(test_cachemanager
+    core_storage
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME cachemanager COMMAND test_cachemanager)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )

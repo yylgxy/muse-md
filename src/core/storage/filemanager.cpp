@@ -3,10 +3,21 @@
 #include "fileutils.h"
 #include "logger.h"
 
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QStringConverter>
 
 namespace markdown_editor::core::storage {
+
+namespace {
+
+// 耗时数字：缓存命中往往不到 0.1ms，用整数毫秒会全都显示成 0
+QString elapsedMs(const QElapsedTimer &timer)
+{
+    return QString::number(double(timer.nsecsElapsed()) / 1e6, 'f', 3);
+}
+
+}  // namespace
 
 FileManager::FileManager(QObject *parent) : QObject(parent) {}
 
@@ -18,20 +29,67 @@ bool FileManager::openFile(const QString &path, QString *error)
         error->clear();
     }
 
-    // 1) 先按原始字节读进来。失败就整件事作废：下面的状态一个都不动，
-    //    这样"打开失败"不会把用户当前正在编辑的文档弄丢。
+    // 计时是给用户看的证据：日志里"已打开(命中缓存) … 耗时 0.02 ms"对比
+    // "已打开 … 耗时 1.8 ms"，就是 4.2.3 那条验收（第二次更快）最直接的证明。
+    QElapsedTimer timer;
+    timer.start();
+
+    const QFileInfo info(path);
+
+    // ---- 第一步：查缓存 ----
+    // 先要求文件真实存在：文件都不在了，缓存里的记录也不该采信（那是删掉的文件）。
+    if (info.exists() && !info.isDir()) {
+        CacheManager::Entry cached;
+        switch (m_cache.lookup(path, info, &cached)) {
+        case CacheManager::LookupResult::Hit:
+            // 命中：不读盘、不解码，直接用内存里的内容
+            applyOpenedContent(path, cached.text, cached.encoding);
+            LOG_INFO("已打开(命中缓存): %1（编码 %2，%3 字符，耗时 %4 ms）",
+                     path,
+                     encodingName(cached.encoding),
+                     cached.text.size(),
+                     elapsedMs(timer));
+            return true;
+        case CacheManager::LookupResult::Stale:
+            // 有记录但文件在磁盘上变了（别的程序改过）：必须重新读盘，否则会拿旧内容覆盖新改动
+            LOG_INFO("缓存已过期（文件被别处改过），重新读盘: %1", path);
+            break;
+        case CacheManager::LookupResult::Miss:
+            break;
+        }
+    }
+
+    // ---- 第二步：读盘。失败就整件事作废：下面的状态一个都不动，
+    //      这样"打开失败"不会把用户当前正在编辑的文档弄丢 ----
     QByteArray raw;
     if (!FileUtils::readFileBytes(path, raw, error)) {
         LOG_ERROR("打开失败: %1（%2）", path, error != nullptr ? *error : QString());
         return false;
     }
 
-    // 2) 判编码 → 解码成文本。这两步是纯函数，不碰磁盘，所以能单独测。
+    // 判编码 → 解码成文本。这两步是纯函数，不碰磁盘，所以能单独测。
     const Encoding detected = detectEncoding(raw);
     const QString content = decode(raw, detected);
 
-    // 3) 现在才动状态（顺序：先内容，后标志，最后发信号 —— 槽函数里看到的是一致状态）
-    m_encoding = detected;
+    applyOpenedContent(path, content, detected);
+    LOG_INFO("已打开: %1（编码 %2，%3 字节，耗时 %4 ms）",
+             path,
+             encodingName(detected),
+             raw.size(),
+             elapsedMs(timer));
+
+    // 放进缓存：下次打开同一个文件就不用读盘了。
+    // 超过单条上限的大文件会被 CacheManager 自己拒掉（记一笔 rejections），不会撑爆内存。
+    rememberInCache(path, content, detected, raw.size());
+    return true;
+}
+
+// 把"打开成功"这件事一次性落地：状态 + 信号。
+// 读盘命中和缓存命中两条路径共用它，是为了保证两者的行为完全一致 ——
+// 否则很容易写出"走缓存时忘了清脏标志"这类只在特定路径复现的 bug。
+void FileManager::applyOpenedContent(const QString &path, const QString &content, Encoding encoding)
+{
+    m_encoding = encoding;
     m_readOnly = isReadOnlyFile(path);
 
     m_document.setMarkdownText(content);
@@ -41,12 +99,6 @@ bool FileManager::openFile(const QString &path, QString *error)
     emit modificationChanged(false);
     emit fileOpened(path);
 
-    LOG_INFO("已打开: %1（编码 %2，%3 字节，%4）",
-             path,
-             encodingName(detected),
-             raw.size(),
-             m_readOnly ? QStringLiteral("只读") : QStringLiteral("可写"));
-
     if (m_readOnly) {
         // 只读不是失败：文件照样能看能改，只是保存会失败。把"原因"交给 UI 去提示。
         const QString reason = QStringLiteral("这个文件是只读的，内容可以看也可以改，但「保存」会失败。\n"
@@ -55,8 +107,20 @@ bool FileManager::openFile(const QString &path, QString *error)
         LOG_WARN("文件是只读的: %1", path);
         emit readOnlyDetected(path, reason);
     }
+}
 
-    return true;
+void FileManager::rememberInCache(const QString &path, const QString &content, Encoding encoding, qint64 fileSize)
+{
+    CacheManager::Entry entry;
+    entry.text = content;
+    entry.encoding = encoding;
+    entry.size = fileSize;
+    // 记下"这份内容对应的磁盘状态"：下次查找时用它判断文件有没有被改过
+    entry.lastModified = QFileInfo(path).lastModified();
+
+    if (!m_cache.insert(path, entry)) {
+        LOG_INFO("未进缓存（超过单条上限 %1 字节，或缓存已关闭）: %2", m_cache.maxEntryBytes(), path);
+    }
 }
 
 bool FileManager::saveFile(QString *error)
@@ -145,6 +209,10 @@ bool FileManager::writeTo(const QString &path, QString *error)
 
     LOG_INFO("已保存: %1（编码 %2，%3 字节）", path, encodingName(m_encoding), bytes.size());
 
+    // 缓存里那份内容已经旧了。直接换成刚写进去的（而不是删掉）——
+    // "保存之后紧接着又打开同一个文件"是很常见的操作，这样它也是缓存命中。
+    rememberInCache(path, m_document.getMarkdownText(), m_encoding, bytes.size());
+
     // 保存成功之后再打快照。顺序有讲究：先把 fileSaved 发出去（界面立刻更新成"已保存"），
     // 再做可能要多花几十毫秒的 git 操作，用户不会觉得保存卡。
     snapshotAfterSave();
@@ -208,6 +276,18 @@ void FileManager::setAutoSnapshotEnabled(bool enabled)
 bool FileManager::autoSnapshotEnabled() const
 {
     return m_autoSnapshot;
+}
+
+// ============================ 缓存（4.2.3）============================
+
+CacheManager *FileManager::cacheManager()
+{
+    return &m_cache;
+}
+
+const CacheManager *FileManager::cacheManager() const
+{
+    return &m_cache;
 }
 
 // ============================ 内容与状态 ============================

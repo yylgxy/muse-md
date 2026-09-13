@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QString>
 
+#include "cachemanager.h"      // 值成员，需要完整类型（它又带来了 textencoding.h 里的 Encoding）
 #include "markdowndocument.h"  // 值成员，需要完整类型
 #include "versioncontrol.h"    // 值成员，需要完整类型
 
@@ -44,15 +45,10 @@ class FileManager : public QObject
     Q_OBJECT
 
 public:
-    // 文本编码。检测结果和"保存时按什么写回去"都用它。
-    enum class Encoding {
-        Utf8,       // UTF-8 无 BOM（默认；新建文档用它）
-        Utf8Bom,    // UTF-8 带 BOM（Windows 记事本"另存为 UTF-8"会加）
-        Utf16LE,    // 小端 UTF-16（记事本里的"Unicode"）
-        Utf16BE,    // 大端 UTF-16
-        Local8Bit,  // 本机 ANSI 代码页（中文 Windows = GBK / CP936），留给老的 GBK 文档
-    };
-    Q_ENUM(Encoding)
+    // 文本编码。枚举本体住在 textencoding.h（4.2.3 挪出去的，理由见那个头文件：
+    // cachemanager.h 也要用它，不能反过来 include 本文件，否则就循环了）。
+    // 这里保留别名，所以外面原来的写法 FileManager::Encoding::Utf8 完全不受影响。
+    using Encoding = markdown_editor::core::storage::Encoding;
 
     explicit FileManager(QObject *parent = nullptr);
 
@@ -142,6 +138,15 @@ public:
     void setAutoSnapshotEnabled(bool enabled);
     bool autoSnapshotEnabled() const;
 
+    // ============================ 缓存（4.2.3）============================
+
+    // 最近打开过的文件内容缓存（LRU）。打开文件时会先查它：
+    //   命中且没过期 → 不读盘，直接用内存里的内容；
+    //   过期（文件被别的程序改过）→ 重新读盘并覆盖缓存。
+    // 返回可写的指针是为了让 UI 能调 setMaxEntries()/statisticsText() 这类配置和统计。
+    CacheManager *cacheManager();
+    const CacheManager *cacheManager() const;
+
 signals:
     // 文件已成功打开（内容已经进文档、脏标志已清）
     void fileOpened(const QString &path);
@@ -159,6 +164,13 @@ private:
     // saveFile / saveFileAs 共用的落地动作：可写性检查 → 按当前编码编码 → 原子写 → 更新状态 → 发信号
     bool writeTo(const QString &path, QString *error);
 
+    // 把"打开成功"这件事一次性落到状态里（编码、只读、文档内容、脏标志）。
+    // 读盘命中和缓存命中两条路径共用它，保证两条路径的状态变化一模一样。
+    void applyOpenedContent(const QString &path, const QString &content, Encoding encoding);
+
+    // 把刚读到的内容放进缓存（会按文件当前的修改时间/大小记下"新鲜度"）。
+    void rememberInCache(const QString &path, const QString &content, Encoding encoding, qint64 fileSize);
+
     // 保存成功之后自动打快照（4.2.2）。
     // 约定：**任何失败都不影响"保存成功"这个结论** —— 没装 git、仓库建不起来、
     // 提交失败，全都只写一条日志。用户按 Ctrl+S 的目的是保存文件，不是维护历史。
@@ -173,6 +185,7 @@ private:
     markdown_editor::core::document::MarkdownDocument m_document;  // 内容 + 路径 + 脏标志 + HTML 缓存
 
     VersionControl m_history;      // 轻量快照（4.2.2），仓库位置由它自己决定
+    CacheManager m_cache;          // 最近打开文件的内容缓存（4.2.3）
     bool m_autoSnapshot = true;    // 保存后自动打快照
     Encoding m_encoding = Encoding::Utf8;  // 当前文档的编码（打开时检测，保存时按它写回）
     bool m_readOnly = false;               // 当前文件是否只读

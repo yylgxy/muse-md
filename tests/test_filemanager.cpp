@@ -18,6 +18,7 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
@@ -427,6 +428,92 @@ int main(int argc, char *argv[])
               QStringLiteral("自动快照: 内容没变 -> 不新增历史"));
     } else {
         std::printf("%-58s SKIP  [系统里没找到 git]\n", "自动快照: 保存时创建历史");
+    }
+
+    // ============================ 6. 缓存服务（4.2.3 集成）============================
+    // 验收点是"重复打开同一个文件，第二次直接走缓存、更快"。这里不光看统计数字，
+    // 还用一个"铁证"来证明第二次真的没有读盘（见下面那段注释）。
+    {
+        FileManager files;
+        files.cacheManager()->setMaxEntries(2);  // 上限调小，方便验证淘汰
+
+        const QString docA = work + QStringLiteral("/cache-a.md");
+        const QString docB = work + QStringLiteral("/cache-b.md");
+        const QString docC = work + QStringLiteral("/cache-c.md");
+        FileUtils::writeFileBytes(docA, QStringLiteral("甲文件内容\n").toUtf8());
+        FileUtils::writeFileBytes(docB, QStringLiteral("乙文件内容\n").toUtf8());
+        FileUtils::writeFileBytes(docC, QStringLiteral("丙文件内容\n").toUtf8());
+
+        QString err;
+        check(files.openFile(docA, &err), QStringLiteral("缓存: 第一次打开 A"), err);
+        check(files.cacheManager()->size() == 1, QStringLiteral("缓存: 打开后内容进了缓存"));
+        check(files.cacheManager()->misses() == 1 && files.cacheManager()->hits() == 0,
+              QStringLiteral("缓存: 第一次是未命中（老老实实读了盘）"));
+
+        check(files.openFile(docA, &err), QStringLiteral("缓存: 第二次打开 A"));
+        check(files.cacheManager()->hits() == 1, QStringLiteral("缓存: 第二次命中（★这就是验收点）"));
+        check(files.text() == QStringLiteral("甲文件内容\n"), QStringLiteral("缓存: 命中时内容正确"));
+
+        // ---- 铁证：证明第二次真的没读盘 ----
+        // 把磁盘上的内容换成**同样长度**的别的内容，再把修改时间改回缓存里记的那个值。
+        // 于是"修改时间 + 字节数"两项都对得上，缓存察觉不到 —— 打开拿到的仍是缓存里的旧内容。
+        // 只有"根本没看磁盘"才会是这个结果。
+        const QDateTime cachedTime = QFileInfo(docA).lastModified();
+        FileUtils::writeFileBytes(docA, QStringLiteral("乙文件内容\n").toUtf8());  // 与甲文件内容等长
+        {
+            QFile fix(docA);
+            fix.open(QIODevice::ReadWrite);
+            // Qt 6.5 的 setFileTime 没有默认参数，必须显式说明改的是"修改时间"
+            fix.setFileTime(cachedTime, QFileDevice::FileModificationTime);
+            fix.close();
+        }
+        const bool trickHit = (files.openFile(docA, &err)
+                               && files.text() == QStringLiteral("甲文件内容\n")
+                               && files.cacheManager()->hits() == 2);
+        check(trickHit, QStringLiteral("缓存: ★内容变了但时间/大小没变 → 仍返回缓存内容（证明没读盘）"));
+
+        // 把故意制造的错位清掉：先丢掉那条记录、重新打开一次，让缓存和磁盘重新对齐。
+        // （必须先清掉再打开，否则下面那次"文件被外部改过"会被算成未命中而不是过期 —— 我第一版就写错了。）
+        files.cacheManager()->remove(docA);
+        check(files.openFile(docA, &err), QStringLiteral("缓存: 重新打开 A，让缓存与磁盘对齐"), err);
+
+        // ---- 文件被别的程序改过（大小也变了）→ 必须重新读盘，不能拿旧内容顶 ----
+        FileUtils::writeFileBytes(docA, QStringLiteral("甲文件内容被别的程序改长了\n").toUtf8());
+        check(files.openFile(docA, &err), QStringLiteral("缓存: 文件被外部改过后重新打开"), err);
+        check(files.text() == QStringLiteral("甲文件内容被别的程序改长了\n"),
+              QStringLiteral("缓存: ★过期后重新读盘（不会用旧内容覆盖别人的改动）"));
+        check(files.cacheManager()->staleCount() >= 1, QStringLiteral("缓存: 记了一次过期"));
+
+        // ---- 保存之后，缓存里应该就是刚保存的内容 ----
+        files.setText(QStringLiteral("保存后的新内容\n"));
+        check(files.saveFile(&err), QStringLiteral("缓存: 保存"), err);
+        check(files.openFile(docA, &err) && files.text() == QStringLiteral("保存后的新内容\n"),
+              QStringLiteral("缓存: 保存后重新打开，内容与磁盘一致"));
+
+        // ---- 淘汰：上限 2，访问一下 A 再打开 C，被淘汰的应该是 B（LRU）----
+        check(files.openFile(docB, &err), QStringLiteral("缓存: 打开 B"), err);
+        check(files.openFile(docA, &err), QStringLiteral("缓存: 再打开 A（刷新它的最近使用时间）"), err);
+        check(files.openFile(docC, &err), QStringLiteral("缓存: 打开 C（触发淘汰）"), err);
+        check(files.cacheManager()->size() == 2, QStringLiteral("缓存: 条数不超过上限"));
+        check(!files.cacheManager()->contains(docB), QStringLiteral("缓存: 最久未使用的 B 被淘汰"));
+        check(files.cacheManager()->contains(docA), QStringLiteral("缓存: 刚访问过的 A 还在（LRU）"));
+
+        // ---- 计时参考（只打印不断言：机器负载会让时间抖动，断言会变成不稳定的测试）----
+        QElapsedTimer timer;
+        timer.start();
+        files.cacheManager()->remove(docA);
+        files.openFile(docA, &err);
+        const double fromDisk = double(timer.nsecsElapsed()) / 1e6;
+        timer.restart();
+        files.openFile(docA, &err);
+        const double fromCache = double(timer.nsecsElapsed()) / 1e6;
+        std::printf("%-58s %s\n",
+                    "计时参考（不是断言）",
+                    QStringLiteral("读盘 %1 ms → 命中缓存 %2 ms")
+                        .arg(fromDisk, 0, 'f', 3)
+                        .arg(fromCache, 0, 'f', 3)
+                        .toUtf8()
+                        .constData());
     }
 
     QDir(work).removeRecursively();
