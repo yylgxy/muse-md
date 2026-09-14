@@ -2,8 +2,8 @@
 
 #include "ui_mainwindow.h"  // uic 根据 mainwindow.ui 生成（AUTOUIC 负责，不用手工写）
 
+#include "editorwidget.h"  // .ui 里把 editor 提升成了它（界面要用它的 cursorMoved 信号）
 #include "logger.h"
-#include "markdownhighlighter.h"
 #include "syncbridge.h"
 
 #include <QAction>
@@ -64,11 +64,8 @@ void MainWindow::initUi()
 {
     // 这里是"控件建好之后的接线和配置"，不是布局 —— 所以仍然在代码里。
 
-    // Tab 宽度按 4 个空格算（这属于运行期计算，.ui 里没法表达）
-    ui->editor->setTabStopDistance(4 * ui->editor->fontMetrics().horizontalAdvance(QLatin1Char(' ')));
-
-    // 语法高亮挂到编辑器的文档上（QSyntaxHighlighter 会自己接管重绘）
-    m_highlighter = new MarkdownHighlighter(ui->editor->document());
+    // 注意：制表位宽度和语法高亮现在都不在这里设置了（5.1 起归 EditorWidget 自己管）：
+    // 高亮器挂在它的文档上、缩进宽度决定制表位宽度，主窗口不用再照顾这些细节。
 
     // 把预览视图交给渲染管线：它会给 view 换一个"能转发 console 日志"的页面，
     // 并持有页面、负责模板加载和内容推送（4.1.4）
@@ -94,6 +91,10 @@ void MainWindow::initUi()
     // 内容刚被推给页面 → 页面里的块是新的，滚动位置得重新对齐一次
     // （以前这行写在 pushContentToPreview() 末尾，现在渲染器不再认识编辑器，改用信号通知）
     connect(&m_renderer, &PreviewRenderer::contentRendered, this, &MainWindow::onEditorScrolled);
+
+    // 光标位置 → 状态栏。行列都从 1 起算，EditorWidget 已经换算好了，
+    // 所以这里不需要再做 0/1 转换（全项目的 1 起算约定由控件内部兜住）。
+    connect(ui->editor, &EditorWidget::cursorMoved, this, &MainWindow::onCursorMoved);
 
     // ---- 文件管理器的信号：文件层面的变化 → 界面提示 ----
     // 主窗口不认识"编码/只读/脏标志"这些细节，只负责把管理器的结论显示出来：
@@ -174,6 +175,10 @@ void MainWindow::initToolBar()
 void MainWindow::initStatusBar()
 {
     statusBar()->showMessage(QStringLiteral("就绪"));
+
+    // 光标位置：由 EditorWidget::cursorMoved 推过来（行列都从 1 起算）
+    m_cursorLabel = new QLabel(this);
+    statusBar()->addPermanentWidget(m_cursorLabel);
 
     // 右侧常驻的缓存状态：这是"第二次打开同一个文件走了缓存"最直观的可见证据。
     // 用 addPermanentWidget（不会被临时消息顶掉），鼠标悬停能看到完整统计。
@@ -620,6 +625,13 @@ void MainWindow::updateCacheStatus()
                               .arg(hitRate, 0, 'f', 0));
     // 鼠标悬停看完整统计（CacheManager 已经提供了一行可读文本）
     m_cacheLabel->setToolTip(cache->statisticsText());
+}
+
+void MainWindow::onCursorMoved(int line, int column)
+{
+    if (m_cursorLabel != nullptr) {
+        m_cursorLabel->setText(QStringLiteral("行 %1，列 %2").arg(line).arg(column));
+    }
 }
 
 // ============================ 其它 ============================

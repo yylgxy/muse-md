@@ -9,7 +9,6 @@
 
 class QAction;
 class QLabel;
-class MarkdownHighlighter;  // 全局命名空间的类（命名空间不统一的遗留）
 
 namespace markdown_editor::core::document {
 class SyncBridge;
@@ -80,6 +79,9 @@ private slots:
     void onEditorScrolled();
     void onPreviewClicked(int line);
 
+    // 编辑器报上来的光标位置（行列都从 1 起算）→ 状态栏
+    void onCursorMoved(int line, int column);
+
     // FileManager 的信号
     void onFileOpened(const QString &path);
     void onFileSaved(const QString &path);
@@ -87,7 +89,8 @@ private slots:
     void onReadOnlyDetected(const QString &path, const QString &reason);
 
 private:
-    // 把 .ui 建好的控件和外部对象（高亮器、文件管理器、同步桥、WebChannel、渲染器）接起来
+    // 把 .ui 建好的控件和外部对象（文件管理器、同步桥、WebChannel、渲染器）接起来
+    // （语法高亮和缩进宽度现在归 EditorWidget 自己管，见 src/business/editorwidget.h）
     void initUi();
     // 菜单/工具栏/状态栏：这些用 .ui 表达不了（快捷键、动作、连接都是代码的事），所以留在代码里
     void initMenuBar();
@@ -109,7 +112,6 @@ private:
 
     Ui::MainWindow *ui = nullptr;
 
-    MarkdownHighlighter *m_highlighter = nullptr;
     markdown_editor::core::document::SyncBridge *m_bridge = nullptr;
 
     // 文档内容 + 磁盘路径 + 脏标志 + 编码 + 只读状态（唯一事实来源，别再在别处存一份）
@@ -127,7 +129,8 @@ private:
     QAction *m_rollbackAction = nullptr;
     QAction *m_clearCacheAction = nullptr;
 
-    QLabel *m_cacheLabel = nullptr;  // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
+    QLabel *m_cacheLabel = nullptr;   // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
+    QLabel *m_cursorLabel = nullptr;  // 状态栏上的"行 x，列 y"（来自 EditorWidget::cursorMoved）
 };
 
 #endif // MAINWINDOW_H

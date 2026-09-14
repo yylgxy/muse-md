@@ -23,7 +23,7 @@
       <property name="childrenCollapsible">
        <bool>false</bool>
       </property>
-      <widget class="QPlainTextEdit" name="editor">
+      <widget class="EditorWidget" name="editor">
        <property name="placeholderText">
         <string>在这里写 Markdown…</string>
        </property>
@@ -51,6 +51,14 @@
    <class>QWebEngineView</class>
    <extends>QWidget</extends>
    <header>qwebengineview.h</header>
+  </customwidget>
+  <!-- 同一套"提升"机制用在自定义控件上：EditorWidget 继承自 QPlainTextEdit，
+       所以 extends 写 QPlainTextEdit（Designer 才知道该把它当成什么来布局）。
+       header 是相对于项目的包含路径；ui 目标链接了 business，所以能找到 editorwidget.h。 -->
+  <customwidget>
+   <class>EditorWidget</class>
+   <extends>QPlainTextEdit</extends>
+   <header>editorwidget.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

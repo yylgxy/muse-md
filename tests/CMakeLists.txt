@@ -142,11 +142,27 @@ target_link_libraries(test_cachemanager
 )
 add_test(NAME cachemanager COMMAND test_cachemanager)
 
+# ---------------- EditorWidget 契约测试（5.1）----------------
+# 这个测试要有 **QApplication**（QWidget 依赖它，QGuiApplication 不够），
+# 而且它用 QApplication::sendEvent 发**真实按键事件**来验证自动缩进、括号闭合这些行为。
+# 链接 business（EditorWidget）+ core_document（MarkdownHighlighter 是它的接口的一部分）。
+add_executable(test_editorwidget
+    test_editorwidget.cpp
+)
+target_link_libraries(test_editorwidget
+    business
+    core_document
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME editorwidget COMMAND test_editorwidget)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。
