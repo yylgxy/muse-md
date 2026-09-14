@@ -3,6 +3,8 @@
 add_library(business STATIC
     editorwidget.h
     editorwidget.cpp
+    tabmanager.h
+    tabmanager.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。

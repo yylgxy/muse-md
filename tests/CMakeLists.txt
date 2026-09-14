@@ -158,11 +158,25 @@ target_link_libraries(test_editorwidget
 )
 add_test(NAME editorwidget COMMAND test_editorwidget)
 
+# ---------------- TabManager 契约测试（5.2）----------------
+# 同样需要 QApplication。重点验证"关闭确认回调说取消时标签不会被关掉"，
+# 以及"关标签真的把页面释放了"（用 QPointer 观察）。
+add_executable(test_tabmanager
+    test_tabmanager.cpp
+)
+target_link_libraries(test_tabmanager
+    business
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME tabmanager COMMAND test_tabmanager)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

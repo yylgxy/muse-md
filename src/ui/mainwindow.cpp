@@ -2,9 +2,10 @@
 
 #include "ui_mainwindow.h"  // uic 根据 mainwindow.ui 生成（AUTOUIC 负责，不用手工写）
 
-#include "editorwidget.h"  // .ui 里把 editor 提升成了它（界面要用它的 cursorMoved 信号）
+#include "editorwidget.h"  // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
 #include "logger.h"
 #include "syncbridge.h"
+#include "tabmanager.h"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -35,21 +36,24 @@
 using markdown_editor::core::document::PreviewRenderer;
 using markdown_editor::core::document::SyncBridge;
 using markdown_editor::core::storage::CacheManager;
-using markdown_editor::core::storage::FileManager;
 using markdown_editor::core::storage::VersionControl;
+// 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
+// 成员函数体里直接用短名字就行，不会和全局作用域冲突。
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
-    // ★ 一行顶掉原来 initUi 里"建 splitter / 建 editor / 建 preview / 加进布局"那 20 行：
+    // ★ 一行顶掉原来"建 splitter / 建 editor / 建 preview / 加进布局"那一堆：
     //   控件和布局现在由 mainwindow.ui 描述，uic 生成代码，这里只负责"装上去"。
-    //   装好之后就能用 ui->editor / ui->preview / ui->splitter；菜单栏和状态栏仍然用
-    //   QMainWindow 的 menuBar() / statusBar() 取（initMenuBar / initStatusBar 里）。
+    //   装好之后就能用 ui->tabManager / ui->preview / ui->splitter。
     ui->setupUi(this);
 
     initUi();
     initMenuBar();
     initToolBar();
     initStatusBar();
+
+    // 先开一个空标签，保证界面上永远有一个可编辑的地方（后面所有代码就能少写一堆判空）
+    createSession();
     updateWindowTitle();
 }
 
@@ -63,9 +67,6 @@ MainWindow::~MainWindow()
 void MainWindow::initUi()
 {
     // 这里是"控件建好之后的接线和配置"，不是布局 —— 所以仍然在代码里。
-
-    // 注意：制表位宽度和语法高亮现在都不在这里设置了（5.1 起归 EditorWidget 自己管）：
-    // 高亮器挂在它的文档上、缩进宽度决定制表位宽度，主窗口不用再照顾这些细节。
 
     // 把预览视图交给渲染管线：它会给 view 换一个"能转发 console 日志"的页面，
     // 并持有页面、负责模板加载和内容推送（4.1.4）
@@ -83,25 +84,28 @@ void MainWindow::initUi()
     channel->registerObject(QStringLiteral("syncBridge"), m_bridge);
     previewPage->setWebChannel(channel);
 
-    // ---- 信号槽接线 ----
     connect(m_bridge, &SyncBridge::previewClicked, this, &MainWindow::onPreviewClicked);
-    connect(ui->editor, &QPlainTextEdit::textChanged, this, &MainWindow::onEditorTextChanged);
-    connect(ui->editor->verticalScrollBar(), &QScrollBar::valueChanged, this, &MainWindow::onEditorScrolled);
 
-    // 内容刚被推给页面 → 页面里的块是新的，滚动位置得重新对齐一次
-    // （以前这行写在 pushContentToPreview() 末尾，现在渲染器不再认识编辑器，改用信号通知）
-    connect(&m_renderer, &PreviewRenderer::contentRendered, this, &MainWindow::onEditorScrolled);
+    // 内容刚被推给页面 → 页面里的块是新的，滚动位置得重新对齐一次（用当前标签）
+    connect(&m_renderer, &PreviewRenderer::contentRendered, this, [this] {
+        onEditorScrolled(currentEditor());
+    });
 
-    // 光标位置 → 状态栏。行列都从 1 起算，EditorWidget 已经换算好了，
-    // 所以这里不需要再做 0/1 转换（全项目的 1 起算约定由控件内部兜住）。
-    connect(ui->editor, &EditorWidget::cursorMoved, this, &MainWindow::onCursorMoved);
+    // ---- 标签页 ----
+    // 关标签前"要不要保存"的对话框由主窗口提供：TabManager 只负责"问一声、按答案决定关不关"。
+    // 注意这里同时完成了会话回收 —— 函数返回到 TabManager 之后它就把标签页（和编辑器）删掉了，
+    // 我们必须在那之前把会话表里的记录清干净，否则会留下悬空的键。
+    ui->tabManager->setCloseConfirmHandler([this](EditorWidget *editor) {
+        FileManager *files = filesFor(editor);
+        if (!maybeSave(files)) {
+            return false;  // 用户在保存提示里点了取消
+        }
+        removeSession(editor);
+        return true;
+    });
 
-    // ---- 文件管理器的信号：文件层面的变化 → 界面提示 ----
-    // 主窗口不认识"编码/只读/脏标志"这些细节，只负责把管理器的结论显示出来：
-    connect(&m_files, &FileManager::fileOpened, this, &MainWindow::onFileOpened);
-    connect(&m_files, &FileManager::fileSaved, this, &MainWindow::onFileSaved);
-    connect(&m_files, &FileManager::modificationChanged, this, &MainWindow::onModificationChanged);
-    connect(&m_files, &FileManager::readOnlyDetected, this, &MainWindow::onReadOnlyDetected);
+    // 切标签 → 换预览、换标题、换状态栏
+    connect(ui->tabManager, &TabManager::currentEditorChanged, this, &MainWindow::onCurrentTabChanged);
 
     // 先把预览外壳页面装起来（内容等页面加载完、渲染器自己补推）
     m_renderer.loadTemplate(QString());
@@ -114,7 +118,7 @@ void MainWindow::initMenuBar()
 {
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
 
-    m_newAction = fileMenu->addAction(QStringLiteral("新建(&N)"));
+    m_newAction = fileMenu->addAction(QStringLiteral("新建标签(&N)"));
     m_newAction->setShortcut(QKeySequence::New);
     connect(m_newAction, &QAction::triggered, this, &MainWindow::onNewFile);
 
@@ -147,6 +151,23 @@ void MainWindow::initMenuBar()
     QAction *quitAction = fileMenu->addAction(QStringLiteral("退出(&Q)"));
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QWidget::close);
+
+    // ---- 标签菜单（5.2）----
+    QMenu *tabMenu = menuBar()->addMenu(QStringLiteral("标签(&B)"));
+
+    m_closeTabAction = tabMenu->addAction(QStringLiteral("关闭当前标签(&W)"));
+    m_closeTabAction->setShortcut(QKeySequence::Close);
+    connect(m_closeTabAction, &QAction::triggered, this, &MainWindow::onCloseTab);
+
+    tabMenu->addSeparator();
+    // Ctrl+Tab / Ctrl+Shift+Tab 是编辑器的通用习惯，QTabWidget 本身不带，这里补上
+    m_nextTabAction = tabMenu->addAction(QStringLiteral("下一个标签(&N)"));
+    m_nextTabAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Tab));
+    connect(m_nextTabAction, &QAction::triggered, this, &MainWindow::onNextTab);
+
+    m_previousTabAction = tabMenu->addAction(QStringLiteral("上一个标签(&P)"));
+    m_previousTabAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Tab));
+    connect(m_previousTabAction, &QAction::triggered, this, &MainWindow::onPreviousTab);
 
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
@@ -187,80 +208,182 @@ void MainWindow::initStatusBar()
     updateCacheStatus();
 }
 
+// ============================ 会话（一个标签 = 一个文档）============================
+
+EditorWidget *MainWindow::createSession()
+{
+    // FileManager 的父对象是主窗口：即使某个标签被关掉忘了回收，也不会泄漏到进程结束
+    auto *files = new FileManager(this);
+    EditorWidget *editor = ui->tabManager->addEditorTab();
+
+    m_sessions.insert(editor, files);
+    connectSession(editor, files);
+    updateTabLabel(files);
+    return editor;
+}
+
+void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
+{
+    // 每个信号都用 lambda 把"是哪个编辑器/哪个文档"一起带上。
+    // 这样槽函数不用去猜 sender()，也不怕将来加东西时连错对象。
+    connect(editor, &QPlainTextEdit::textChanged, this, [this, editor] { onEditorTextChanged(editor); });
+    connect(editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, editor] {
+        onEditorScrolled(editor);
+    });
+    connect(editor, &EditorWidget::cursorMoved, this, [this, editor](int line, int column) {
+        onCursorMoved(editor, line, column);
+    });
+
+    connect(files, &FileManager::fileOpened, this, [this, files](const QString &path) {
+        onFileOpened(files, path);
+    });
+    connect(files, &FileManager::fileSaved, this, [this, files](const QString &path) {
+        onFileSaved(files, path);
+    });
+    connect(files, &FileManager::modificationChanged, this, [this, files](bool modified) {
+        onModificationChanged(files, modified);
+    });
+    connect(files, &FileManager::readOnlyDetected, this,
+            [this, files](const QString &path, const QString &reason) { onReadOnlyDetected(files, reason); });
+}
+
+EditorWidget *MainWindow::currentEditor() const
+{
+    return ui->tabManager->currentEditor();
+}
+
+// 注意这两个函数的**返回类型**必须写全限定名：
+// C++ 在解析返回类型时还没进入 MainWindow 的作用域，所以类里那个
+// FileManager 别名在这里是看不见的（参数类型在限定名之后，反而能用短名字）。
+markdown_editor::core::storage::FileManager *MainWindow::filesFor(const EditorWidget *editor) const
+{
+    if (editor == nullptr) {
+        return nullptr;
+    }
+    return m_sessions.value(const_cast<EditorWidget *>(editor), nullptr);
+}
+
+markdown_editor::core::storage::FileManager *MainWindow::currentFiles() const
+{
+    return filesFor(currentEditor());
+}
+
+EditorWidget *MainWindow::editorFor(const FileManager *files) const
+{
+    if (files == nullptr) {
+        return nullptr;
+    }
+    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
+        if (it.value() == files) {
+            return it.key();
+        }
+    }
+    return nullptr;
+}
+
+void MainWindow::updateTabLabel(FileManager *files)
+{
+    EditorWidget *editor = editorFor(files);
+    if (editor == nullptr) {
+        return;
+    }
+
+    TabManager::TabInfo info;
+    info.fileName = files->fileName();  // 没有路径时它会返回"未命名"
+    info.filePath = files->filePath();
+    info.modified = files->isModified();
+    ui->tabManager->updateTab(ui->tabManager->indexOf(editor), info);
+}
+
+void MainWindow::showSession(FileManager *files, bool forceReload)
+{
+    if (files == nullptr) {
+        return;
+    }
+
+    const QString dir = files->hasFilePath() ? QFileInfo(files->filePath()).absolutePath() : QString();
+
+    if (forceReload || dir != m_previewBaseDir) {
+        // 目录变了（或调用方明确要求）：重新加载模板，baseUrl 跟着换 ——
+        // 文档里的相对路径图片靠它才找得到
+        m_previewBaseDir = dir;
+        m_renderer.updateContent(files->text());
+        m_renderer.loadTemplate(dir);
+    } else {
+        // 只是换了个标签：只推内容，页面不重载。
+        // 重载页面会闪一下白屏、还会让 WebChannel 重连，切标签时手感很差。
+        m_renderer.updateContentNow(files->text());
+    }
+
+    updateWindowTitle();
+    updateCacheStatus();
+}
+
+void MainWindow::removeSession(EditorWidget *editor)
+{
+    FileManager *files = filesFor(editor);
+    if (files == nullptr) {
+        return;
+    }
+    m_sessions.remove(editor);
+    delete files;  // 立刻回收：关掉的标签不该继续占着内容缓存和历史对象
+}
+
 // ============================ 文件与文档 ============================
 
 bool MainWindow::openFile(const QString &path)
 {
-    // 读盘、判编码、解码、记住路径和只读状态，全在 FileManager 里完成。
+    // 已经打开过的文件不重复开标签，直接切过去（这是多标签编辑器该有的行为）
+    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
+        if (it.value()->filePath() == path) {
+            ui->tabManager->setCurrentIndex(ui->tabManager->indexOf(it.key()));
+            return true;
+        }
+    }
+
+    EditorWidget *editor = createSession();  // 新标签会成为当前标签
+    FileManager *files = filesFor(editor);
+
     QString error;
-    if (!m_files.openFile(path, &error)) {
+    if (!files->openFile(path, &error)) {
         // 失败原因由管理器给出（打不开 / 是文件夹 / 没有权限…），主窗口只负责显示
         QMessageBox::warning(this, QStringLiteral("打开失败"), QStringLiteral("%1\n\n%2").arg(error, path));
+        // 开不了就把这个空标签收回去，别在界面上留一个没用的"未命名"
+        const int index = ui->tabManager->indexOf(editor);
+        removeSession(editor);
+        ui->tabManager->closeTab(index);
         return false;
     }
 
     // 编辑器显示文档内容。setPlainText 会触发 textChanged → onEditorTextChanged
-    // → m_files.setText(同样的内容) → 内容没变，所以不会置脏 ✓
-    ui->editor->setPlainText(m_files.text());
+    // → files->setText(同样的内容) → 内容没变，所以不会置脏 ✓
+    editor->setPlainText(files->text());
+    updateTabLabel(files);
 
-    // 预览那边两件事，顺序不能反：
-    //   ① 告诉渲染器"要显示的是这段内容"（它会记住，等页面就绪后再推）
-    //   ② 换 baseUrl 到文档所在目录 —— 文档里的相对图片靠它才找得到
-    m_renderer.updateContent(m_files.text());
-    m_renderer.loadTemplate(QFileInfo(path).absolutePath());
-
-    // 标题栏的更新交给 fileOpened 信号（onFileOpened）
+    // 换文档了：baseUrl 必须跟着换（forceReload = true）
+    showSession(files, true);
     return true;
 }
 
 void MainWindow::onNewFile()
 {
-    if (!maybeSave()) {
-        return;  // 用户按了取消：什么都别做，不能把没保存的内容丢掉
-    }
+    // 多标签之后"新建"就是开一个新标签 —— 不需要再问"当前文档要不要保存"了：
+    // 当前文档不会被丢掉，那个提示属于"关闭标签"的场景。
+    EditorWidget *editor = createSession();
+    FileManager *files = filesFor(editor);
 
-    m_files.newFile();    // 清空内容、丢掉路径、清掉脏标志、编码回到 UTF-8
-    ui->editor->clear();  // 编辑器跟着清空
-
-    // 预览也回到"没有文档"的状态：baseUrl 变回 about:blank，内容清空
-    m_renderer.updateContent(m_files.text());
-    m_renderer.loadTemplate(QString());
-}
-
-// 有未保存的修改时先问一句。返回 false = 用户取消，调用方必须中止当前操作。
-bool MainWindow::maybeSave()
-{
-    if (!m_files.isModified()) {
-        return true;
-    }
-
-    const QMessageBox::StandardButton answer =
-        QMessageBox::warning(this,
-                             QStringLiteral("有未保存的修改"),
-                             QStringLiteral("「%1」有未保存的修改，要先保存吗？").arg(m_files.fileName()),
-                             QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-                             QMessageBox::Save);
-
-    if (answer == QMessageBox::Cancel) {
-        return false;
-    }
-    if (answer == QMessageBox::Discard) {
-        return true;
-    }
-
-    onSaveFile();                  // 新文档没有路径时，它自己会转去「另存为」
-    return !m_files.isModified();  // 保存失败、或用户取消了另存为 → 别继续往下丢内容
+    editor->clear();
+    updateTabLabel(files);
+    showSession(files, true);  // 新文档没有路径 → baseUrl 回到 about:blank
 }
 
 void MainWindow::onOpenFile()
 {
-    if (!maybeSave()) {
-        return;
-    }
-
-    const QString startDir = m_files.filePath().isEmpty()
+    FileManager *files = currentFiles();
+    const QString startDir = (files == nullptr || !files->hasFilePath())
                                  ? QDir::homePath()
-                                 : QFileInfo(m_files.filePath()).absolutePath();
+                                 : QFileInfo(files->filePath()).absolutePath();
+
     const QString path = QFileDialog::getOpenFileName(
         this,
         QStringLiteral("打开 Markdown 文件"),
@@ -271,61 +394,94 @@ void MainWindow::onOpenFile()
     }
 }
 
-void MainWindow::onSaveFile()
+bool MainWindow::saveSession(FileManager *files, EditorWidget *editor)
 {
-    // 保证管理器里是最新内容（正常打字时 setText 已经同步过，这里是保险）
-    m_files.setText(ui->editor->toPlainText());
+    if (files == nullptr || editor == nullptr) {
+        return false;
+    }
 
-    if (!m_files.hasFilePath()) {
-        onSaveFileAs();  // 新文档还没有路径 → 走另存为
-        return;
+    // 保证管理器里是最新内容（正常打字时 setText 已经同步过，这里是保险）
+    files->setText(editor->toPlainText());
+
+    if (!files->hasFilePath()) {
+        return saveSessionAs(files, editor);  // 新文档还没有路径 → 走另存为
     }
 
     QString error;
-    if (!m_files.saveFile(&error)) {
+    if (!files->saveFile(&error)) {
         // 失败原因由管理器给出（只读 / 没有写权限 / 文件被占用…）。
-        // 注意：失败时脏标志仍然是 true，界面上的 * 不会被去掉。
+        // 注意：失败时脏标志仍然是 true，标签上的 * 不会被去掉。
         QMessageBox::warning(this, QStringLiteral("保存失败"), error);
+        return false;
     }
-    // 成功的话，标题栏和状态栏由 fileSaved 信号更新
+    // 成功的话，标签/标题/状态栏由 fileSaved 信号更新
+    return true;
 }
 
-void MainWindow::onSaveFileAs()
+bool MainWindow::saveSessionAs(FileManager *files, EditorWidget *editor)
 {
-    const QString startPath = m_files.filePath().isEmpty() ? QDir::homePath() : m_files.filePath();
+    if (files == nullptr || editor == nullptr) {
+        return false;
+    }
+
+    const QString startPath = files->hasFilePath() ? files->filePath() : QDir::homePath();
     const QString path = QFileDialog::getSaveFileName(this,
                                                       QStringLiteral("另存为"),
                                                       startPath,
                                                       QStringLiteral("Markdown (*.md);;所有文件 (*)"));
     if (path.isEmpty()) {
-        return;
+        return false;  // 用户取消了
     }
 
-    m_files.setText(ui->editor->toPlainText());
+    files->setText(editor->toPlainText());
 
     QString error;
-    if (!m_files.saveFileAs(path, &error)) {
+    if (!files->saveFileAs(path, &error)) {
         QMessageBox::warning(this, QStringLiteral("保存失败"), error);
-        return;
+        return false;
     }
 
-    // 换目录了：baseUrl 要跟着换，否则文档里的相对图片会指错地方
-    m_renderer.loadTemplate(QFileInfo(path).absolutePath());
+    updateTabLabel(files);
+    // 换目录了：如果这正是当前标签，预览的 baseUrl 也要跟着换
+    if (files == currentFiles()) {
+        showSession(files, true);
+    }
+    return true;
+}
+
+void MainWindow::onSaveFile()
+{
+    saveSession(currentFiles(), currentEditor());
+}
+
+void MainWindow::onSaveFileAs()
+{
+    saveSessionAs(currentFiles(), currentEditor());
 }
 
 // ============================ 编辑器 → 预览 ============================
 
-void MainWindow::onEditorTextChanged()
+void MainWindow::onEditorTextChanged(EditorWidget *editor)
 {
-    // 内容真的变了才继续往下走：setText() 在"内容没变"时返回 false
-    // （例如打开文件时 setPlainText 带来的那一次 textChanged，以及 newFile 之后的清空）
-    if (!m_files.setText(ui->editor->toPlainText())) {
+    FileManager *files = filesFor(editor);
+    if (files == nullptr) {
         return;
     }
 
-    // 交给渲染管线。防抖（300ms）在 PreviewRenderer 里，主窗口不再自己管计时器：
-    // 敲字时它会把这次更新一直往后推，停下来之后才真正渲染一次。
-    m_renderer.updateContent(m_files.text());
+    // 内容真的变了才继续往下走：setText() 在"内容没变"时返回 false
+    // （例如打开文件时 setPlainText 带来的那一次 textChanged）
+    if (!files->setText(editor->toPlainText())) {
+        return;
+    }
+
+    updateTabLabel(files);  // 标签上的 * 立刻出现
+
+    // 只有当前标签的改动才推到预览：别的标签改内容（比如程序自己填充）不该抢走预览
+    if (editor == currentEditor()) {
+        // 防抖（300ms）在 PreviewRenderer 里：敲字时它会把这次更新一直往后推，
+        // 停下来之后才真正渲染一次。
+        m_renderer.updateContent(files->text());
+    }
 
     updateWindowTitle();
 }
@@ -334,7 +490,12 @@ void MainWindow::onEditorTextChanged()
 
 void MainWindow::onPreviewClicked(int line)
 {
-    QTextDocument *doc = ui->editor->document();
+    EditorWidget *editor = currentEditor();
+    if (editor == nullptr) {
+        return;
+    }
+
+    QTextDocument *doc = editor->document();
     if (doc->blockCount() <= 0) {
         return;
     }
@@ -344,26 +505,77 @@ void MainWindow::onPreviewClicked(int line)
     const int blockNumber = qBound(0, line - 1, doc->blockCount() - 1);
 
     QTextCursor cursor(doc->findBlockByNumber(blockNumber));
-    ui->editor->setTextCursor(cursor);
-    ui->editor->centerCursor();  // 让目标行落在屏幕中间，而不是贴着边
-    ui->editor->setFocus();
+    editor->setTextCursor(cursor);
+    editor->centerCursor();  // 让目标行落在屏幕中间，而不是贴着边
+    editor->setFocus();
 
     LOG_INFO("预览点击 → 编辑器跳到第 %1 行", line);
 }
 
 // ============================ 编辑器滚动 → 预览滚动 ============================
 
-void MainWindow::onEditorScrolled()
+void MainWindow::onEditorScrolled(EditorWidget *editor)
 {
+    if (editor == nullptr || m_bridge == nullptr) {
+        return;
+    }
+    // 后台标签的滚动不该带走预览
+    if (editor != currentEditor()) {
+        return;
+    }
+
     // 当前最顶可见行 = 视口左上角那个位置对应的文本块。
     // 注意：QPlainTextEdit::firstVisibleBlock() 是 protected 的，外部调不到，
     // 所以走 cursorForPosition()（它接受的是视口坐标）。
-    const int blockNumber = ui->editor->cursorForPosition(QPoint(0, 0)).blockNumber();
+    const int blockNumber = editor->cursorForPosition(QPoint(0, 0)).blockNumber();
     const int line = blockNumber + 1;  // blockNumber() 是 0 起算 → +1 变成"人类行号"
 
-    if (m_bridge) {
-        m_bridge->reportEditorScroll(line);  // → editorScrolled 信号 → JS scrollToLine()
+    m_bridge->reportEditorScroll(line);  // → editorScrolled 信号 → JS scrollToLine()
+}
+
+// ============================ 标签切换 ============================
+
+void MainWindow::onCurrentTabChanged(EditorWidget *editor)
+{
+    if (editor == nullptr) {
+        // 所有标签都被关掉了：立刻补一个干净的新标签。
+        // 这样"界面上永远有一个编辑器"这条不变式一直成立，后面所有代码都能少写判空。
+        createSession();
+        return;
     }
+
+    FileManager *files = filesFor(editor);
+    showSession(files, false);  // 同目录时只推内容，不重载页面（不闪白）
+
+    // 状态栏的行列要换成这个标签的光标位置
+    const QTextCursor cursor = editor->textCursor();
+    onCursorMoved(editor, cursor.blockNumber() + 1, cursor.positionInBlock() + 1);
+
+    // 让预览滚到这个标签的当前顶行（不然切过来还停在上一篇的位置上）
+    onEditorScrolled(editor);
+}
+
+void MainWindow::onCloseTab()
+{
+    ui->tabManager->requestCloseTab(ui->tabManager->currentIndex());
+}
+
+void MainWindow::onNextTab()
+{
+    const int count = ui->tabManager->count();
+    if (count <= 1) {
+        return;
+    }
+    ui->tabManager->setCurrentIndex((ui->tabManager->currentIndex() + 1) % count);
+}
+
+void MainWindow::onPreviousTab()
+{
+    const int count = ui->tabManager->count();
+    if (count <= 1) {
+        return;
+    }
+    ui->tabManager->setCurrentIndex((ui->tabManager->currentIndex() + count - 1) % count);
 }
 
 // ============================ 文件管理器的结论 → 界面 ============================
@@ -371,34 +583,72 @@ void MainWindow::onEditorScrolled()
 // FileManager 不弹任何对话框（那样它就没法在无窗口的环境里跑了），
 // 只把结论和原因发出来；弹窗、状态栏、标题栏这些"界面表达"全在这里。
 
-void MainWindow::onFileOpened(const QString &path)
+void MainWindow::onFileOpened(FileManager *files, const QString &path)
 {
-    statusBar()->showMessage(QStringLiteral("已打开：%1（%2）")
-                                 .arg(path, FileManager::encodingName(m_files.encoding())));
-    updateWindowTitle();
-    updateCacheStatus();  // 命中/未命中次数刚刚变了
+    if (files == currentFiles()) {
+        statusBar()->showMessage(
+            QStringLiteral("已打开：%1（%2）").arg(path, FileManager::encodingName(files->encoding())));
+    }
+    updateTabLabel(files);
+    if (files == currentFiles()) {
+        updateWindowTitle();
+        updateCacheStatus();  // 命中/未命中次数刚刚变了
+    }
 }
 
-void MainWindow::onFileSaved(const QString &path)
+void MainWindow::onFileSaved(FileManager *files, const QString &path)
 {
-    statusBar()->showMessage(QStringLiteral("已保存：%1（%2）")
-                                 .arg(path, FileManager::encodingName(m_files.encoding())));
-    updateWindowTitle();
-    updateCacheStatus();  // 保存后缓存里换成了新内容
+    updateTabLabel(files);  // 标签上的 * 消失
+    if (files == currentFiles()) {
+        statusBar()->showMessage(
+            QStringLiteral("已保存：%1（%2）").arg(path, FileManager::encodingName(files->encoding())));
+        updateWindowTitle();
+        updateCacheStatus();  // 保存后缓存里换成了新内容
+    }
 }
 
-void MainWindow::onModificationChanged(bool modified)
+void MainWindow::onModificationChanged(FileManager *files, bool modified)
 {
-    // 标题栏的 * 就靠这里。注意：保存成功时先发 modificationChanged(false)、
-    // 再发 fileSaved(path)，所以最后停在状态栏上的是"已保存"这条。
-    updateWindowTitle();
-    statusBar()->showMessage(modified ? QStringLiteral("有未保存的修改") : QStringLiteral("已保存到磁盘"));
+    // 标签上的 * 和标题栏的 * 都靠这里。
+    // 注意：保存成功时先发 modificationChanged(false)、再发 fileSaved(path)，
+    // 所以最后停在状态栏上的是"已保存"这条。
+    updateTabLabel(files);
+    if (files == currentFiles()) {
+        updateWindowTitle();
+        statusBar()->showMessage(modified ? QStringLiteral("有未保存的修改")
+                                          : QStringLiteral("已保存到磁盘"));
+    }
 }
 
-void MainWindow::onReadOnlyDetected(const QString &path, const QString &reason)
+void MainWindow::onReadOnlyDetected(FileManager *files, const QString &reason)
 {
-    LOG_WARN("只读文件: %1", path);
+    Q_UNUSED(files);
     QMessageBox::warning(this, QStringLiteral("文件是只读的"), reason);
+}
+
+// 有未保存的修改时先问一句。返回 false = 用户取消，调用方必须中止当前操作。
+bool MainWindow::maybeSave(FileManager *files)
+{
+    if (files == nullptr || !files->isModified()) {
+        return true;
+    }
+
+    const QMessageBox::StandardButton answer =
+        QMessageBox::warning(this,
+                             QStringLiteral("有未保存的修改"),
+                             QStringLiteral("「%1」有未保存的修改，要先保存吗？").arg(files->fileName()),
+                             QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                             QMessageBox::Save);
+
+    if (answer == QMessageBox::Cancel) {
+        return false;
+    }
+    if (answer == QMessageBox::Discard) {
+        return true;
+    }
+
+    saveSession(files, editorFor(files));  // 新文档没有路径时，它自己会转去「另存为」
+    return !files->isModified();           // 保存失败、或用户取消了另存为 → 别继续往下丢内容
 }
 
 // ============================ 版本历史（4.2.2）============================
@@ -437,15 +687,16 @@ void MainWindow::showTextDialog(const QString &title, const QString &header, con
 
 void MainWindow::onShowHistory()
 {
-    if (!m_files.hasFilePath()) {
+    FileManager *files = currentFiles();
+    if (files == nullptr || !files->hasFilePath()) {
         QMessageBox::information(this,
                                  QStringLiteral("版本历史"),
                                  QStringLiteral("这个文档还没保存过。\n保存一次（Ctrl+S）就会留下第一份快照。"));
         return;
     }
 
-    VersionControl *history = m_files.versionControl();
-    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+    VersionControl *history = files->versionControl();
+    const QString repoDir = history->repositoryPathFor(files->filePath());
 
     QString error;
     const QList<VersionControl::Commit> commits = history->history(repoDir, 50, &error);
@@ -470,7 +721,7 @@ void MainWindow::onShowHistory()
                           commit.message);
     }
 
-    showTextDialog(QStringLiteral("版本历史 — %1").arg(m_files.fileName()),
+    showTextDialog(QStringLiteral("版本历史 — %1").arg(files->fileName()),
                    QStringLiteral("共 %1 个快照（最新的在最上面）\n快照仓库：%2\n"
                                   "想用命令行看：cd 进上面这个目录，然后 git log / git diff")
                        .arg(commits.size())
@@ -480,15 +731,16 @@ void MainWindow::onShowHistory()
 
 void MainWindow::onDiffWithPrevious()
 {
-    if (!m_files.hasFilePath()) {
+    FileManager *files = currentFiles();
+    if (files == nullptr || !files->hasFilePath()) {
         QMessageBox::information(this,
                                  QStringLiteral("与上一版对比"),
                                  QStringLiteral("这个文档还没保存过，没有可对比的版本。"));
         return;
     }
 
-    VersionControl *history = m_files.versionControl();
-    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+    VersionControl *history = files->versionControl();
+    const QString repoDir = history->repositoryPathFor(files->filePath());
 
     QString error;
     const QList<VersionControl::Commit> commits = history->history(repoDir, 2, &error);
@@ -515,7 +767,7 @@ void MainWindow::onDiffWithPrevious()
     }
 
     showTextDialog(
-        QStringLiteral("与上一版对比 — %1").arg(m_files.fileName()),
+        QStringLiteral("与上一版对比 — %1").arg(files->fileName()),
         QStringLiteral("%1（%2） → %3（%4）\n- 开头是上一版的内容，+ 开头是这一版新增的内容")
             .arg(previous.shortHash,
                  previous.time.toString(QStringLiteral("MM-dd HH:mm:ss")),
@@ -529,15 +781,20 @@ void MainWindow::onDiffWithPrevious()
 // 不满意直接不保存就行，所以回滚永远是可撤销的。
 void MainWindow::onRollbackToVersion()
 {
-    if (!m_files.hasFilePath()) {
+    FileManager *files = currentFiles();
+    EditorWidget *editor = currentEditor();
+    if (files == nullptr || editor == nullptr) {
+        return;
+    }
+    if (!files->hasFilePath()) {
         QMessageBox::information(this,
                                  QStringLiteral("回滚到历史版本"),
                                  QStringLiteral("这个文档还没保存过，没有历史版本可以回滚。"));
         return;
     }
 
-    VersionControl *history = m_files.versionControl();
-    const QString repoDir = history->repositoryPathFor(m_files.filePath());
+    VersionControl *history = files->versionControl();
+    const QString repoDir = history->repositoryPathFor(files->filePath());
 
     QString error;
     const QList<VersionControl::Commit> commits = history->history(repoDir, 50, &error);
@@ -546,9 +803,10 @@ void MainWindow::onRollbackToVersion()
         return;
     }
     if (commits.isEmpty()) {
-        QMessageBox::information(this,
-                                 QStringLiteral("回滚到历史版本"),
-                                 QStringLiteral("还没有任何快照。\n保存一次（Ctrl+S）就会留下第一份，之后就能回滚了。"));
+        QMessageBox::information(
+            this,
+            QStringLiteral("回滚到历史版本"),
+            QStringLiteral("还没有任何快照。\n保存一次（Ctrl+S）就会留下第一份，之后就能回滚了。"));
         return;
     }
 
@@ -563,7 +821,7 @@ void MainWindow::onRollbackToVersion()
     bool accepted = false;
     const QString chosen = QInputDialog::getItem(
         this,
-        QStringLiteral("回滚到历史版本 — %1").arg(m_files.fileName()),
+        QStringLiteral("回滚到历史版本 — %1").arg(files->fileName()),
         QStringLiteral("选一个版本，它的内容会载入编辑器。\n"
                        "注意：**不会立刻写盘** —— 看过之后按 Ctrl+S 才保存；\n"
                        "不满意直接不做任何保存即可（当前内容不会被破坏）。"),
@@ -582,7 +840,7 @@ void MainWindow::onRollbackToVersion()
     const VersionControl::Commit picked = commits.at(index);
 
     QString restoreError;
-    if (!m_files.restoreSnapshot(picked.hash, &restoreError)) {
+    if (!files->restoreSnapshot(picked.hash, &restoreError)) {
         QMessageBox::warning(this, QStringLiteral("回滚失败"), restoreError);
         return;
     }
@@ -590,8 +848,9 @@ void MainWindow::onRollbackToVersion()
     // 内容同步到编辑器和预览。
     // 注意 setPlainText 会触发 textChanged → setText(同样的内容) → 返回 false，
     // 所以预览要显式推一次（和打开文件时同样的道理）。
-    ui->editor->setPlainText(m_files.text());
-    m_renderer.updateContent(m_files.text());
+    editor->setPlainText(files->text());
+    m_renderer.updateContent(files->text());
+    updateTabLabel(files);
     updateWindowTitle();
     updateCacheStatus();
 
@@ -602,8 +861,12 @@ void MainWindow::onRollbackToVersion()
 
 void MainWindow::onClearCache()
 {
-    m_files.cacheManager()->clear();
-    statusBar()->showMessage(QStringLiteral("已清空内存缓存（下次打开文件会重新读盘）"));
+    FileManager *files = currentFiles();
+    if (files == nullptr) {
+        return;
+    }
+    files->cacheManager()->clear();
+    statusBar()->showMessage(QStringLiteral("已清空当前文档的内存缓存（下次打开会重新读盘）"));
     updateCacheStatus();
 }
 
@@ -613,7 +876,13 @@ void MainWindow::updateCacheStatus()
         return;
     }
 
-    const CacheManager *cache = m_files.cacheManager();
+    FileManager *files = currentFiles();
+    if (files == nullptr) {
+        m_cacheLabel->setText(QString());
+        return;
+    }
+
+    const CacheManager *cache = files->cacheManager();
     const qint64 lookups = cache->hits() + cache->misses() + cache->staleCount();
     const double hitRate = lookups > 0 ? (100.0 * double(cache->hits()) / double(lookups)) : 0.0;
 
@@ -627,29 +896,37 @@ void MainWindow::updateCacheStatus()
     m_cacheLabel->setToolTip(cache->statisticsText());
 }
 
-void MainWindow::onCursorMoved(int line, int column)
+void MainWindow::onCursorMoved(EditorWidget *editor, int line, int column)
 {
-    if (m_cursorLabel != nullptr) {
-        m_cursorLabel->setText(QStringLiteral("行 %1，列 %2").arg(line).arg(column));
+    // 后台标签的光标变化不该刷新状态栏
+    if (m_cursorLabel == nullptr || editor != currentEditor()) {
+        return;
     }
+    m_cursorLabel->setText(QStringLiteral("行 %1，列 %2").arg(line).arg(column));
 }
 
 // ============================ 其它 ============================
 
 void MainWindow::updateWindowTitle()
 {
+    FileManager *files = currentFiles();
+    const QString name = (files == nullptr) ? QStringLiteral("未命名") : files->fileName();
+    const bool modified = (files != nullptr) && files->isModified();
+
     setWindowTitle(QStringLiteral("%1%2 - Markdown 编辑器")
-                       .arg(m_files.isModified() ? QStringLiteral("*") : QString(), m_files.fileName()));
+                       .arg(modified ? QStringLiteral("*") : QString(), name));
 }
 
-// 关窗口：有未保存的修改就先问一句。
-// 和「新建 / 打开」共用 maybeSave()，保证三处的行为完全一致 ——
-// 少这一处的话，用户点右上角关闭就会把没保存的内容丢掉（原来就是这样）。
+// 关窗口：**每个**有未保存修改的标签都问一遍。
+// 和关标签共用 maybeSave()，保证两种入口的行为完全一致 ——
+// 少这一处的话，用户点右上角关闭就会把没保存的内容丢掉。
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSave()) {
-        event->accept();
-    } else {
-        event->ignore();  // 用户选了取消：窗口不关，继续编辑
+    for (int i = 0; i < ui->tabManager->count(); ++i) {
+        if (!maybeSave(filesFor(ui->tabManager->editorAt(i)))) {
+            event->ignore();  // 用户选了取消：窗口不关，继续编辑
+            return;
+        }
     }
+    event->accept();
 }

@@ -1,12 +1,14 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QHash>
 #include <QMainWindow>
 #include <QString>
 
-#include "filemanager.h"      // 值成员，需要完整类型
+#include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "previewrenderer.h"  // 值成员，需要完整类型
 
+class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
 class QLabel;
 
@@ -15,115 +17,146 @@ class SyncBridge;
 }
 
 // uic 会把 mainwindow.ui 编译成 ui_mainwindow.h，里面是 namespace Ui { class MainWindow; }，
-// 成员就是 .ui 里那些控件的指针（editor / preview / splitter / menubar / statusbar …）。
+// 成员就是 .ui 里那些控件的指针（tabManager / preview / splitter / menubar / statusbar …）。
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
 }
 QT_END_NAMESPACE
 
-// 主窗口：左边编辑器 + 右边预览，两边双向同步。
+// 主窗口：左边多标签编辑器（每个标签一个文档）+ 右边共享预览。
 //
-// 界面写法是"混合式"（真实 Qt 项目最主流的做法）：
-//   * mainwindow.ui  —— 只管"有哪些控件、怎么摆"（splitter + editor + preview）
-//   * 本文件的代码    —— 管所有"行为"：菜单/工具栏/动作（快捷键是 C++ 常量）、
-//                       信号槽接线、WebChannel 注册、防抖、JS 调用、行号换算
-//     .ui 省不掉这些，所以它们留在代码里。
+// 5.2 之后的结构（和单文档时代最大的区别）：
+//   * **一个标签 = 一个会话**：会话 = FileManager（文档内容/路径/脏标志/编码/缓存/历史）
+//     + EditorWidget（那个标签的编辑器）。两者放在 m_sessions 里配对。
+//   * **预览只有一个**：所有标签共用同一个 QWebEngineView 和同一个渲染管线。
+//     切标签时把新文档的内容推过去；只有"文档目录变了"才重新加载模板，
+//     否则页面不重载、不会闪一下白屏。
+//   * 标签页本身的增删/排序/关闭确认机制在 TabManager 里；主窗口通过
+//     setCloseConfirmHandler() 注入"要不要保存"的对话框（策略留在界面层）。
 //
-// 三个部件各管一段（主窗口只做接线和弹窗）：
-//   FileManager     —— 文件层面：打开/保存/另存为/新建、编码、只读、修改标志（4.2.1）
-//   PreviewRenderer —— 渲染管线：模板、防抖、解析、推给预览页（4.1.4）
-//   SyncBridge      —— 双向同步：编辑器滚动 ↔ 预览点击换行号（4.1.3）
+// 数据流（和单文档时代一样，只是"当前会话"而已）：
+//   1) 打字 → FileManager::setText() 置脏 → PreviewRenderer::updateContent() → 防抖 300ms → 推给页面
+//   2) 编辑器滚动 → 算出当前顶行 → SyncBridge 发信号 → 预览页里的 JS scrollToLine()
+//   3) 预览被点击 → JS 调 SyncBridge::reportPreviewClick(行号) → 当前标签的光标跳过去
+//   4) 保存 → 按原编码原子写盘 → 打一个历史快照 → 标签上的 * 消失
 //
-// 数据流：
-//   1) 打开文件 → FileManager 读盘判编码 → text() 灌进编辑器
-//      → 编辑器 textChanged → FileManager::setText() 置脏 → PreviewRenderer::updateContent()
-//      → 防抖 300ms → 渲染 → JS 替换预览内容
-//   2) 编辑器滚动 → 算出当前顶行 → SyncBridge 发 editorScrolled 信号
-//      → 预览页里的 JS scrollToLine() 跟着滚
-//   3) 预览被点击 → JS 调 SyncBridge::reportPreviewClick(行号)
-//      → previewClicked 信号 → 编辑器光标跳到那一行
-//   4) 保存 → FileManager 按原编码原子写盘 → fileSaved 信号 → 标题栏/状态栏更新
-//
-// 行号约定：**1 起算**。这里只有两处做 0/1 转换（onEditorScrolled 和 onPreviewClicked）。
+// 行号约定：**1 起算**。EditorWidget 内部已经把光标行列换算成 1 起算；
+// 这里只在两处做 0/1 转换（onEditorScrolled 和 onPreviewClicked）。
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
+    // 头文件里少写点限定名：这个别名只在 MainWindow 内部可见，不会污染别处。
+    // （在类的成员函数定义里也能用，所以 mainwindow.cpp 里不用再写一遍长名字。）
+    using FileManager = markdown_editor::core::storage::FileManager;
+
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    // 打开一个 Markdown 文件（main() 用命令行参数调用，将来做文件关联也走这里）
+    // 打开一个 Markdown 文件（main() 用命令行参数调用，将来做文件关联也走这里）。
+    // 已经打开过的文件不会再开一个标签，而是直接切过去。
     bool openFile(const QString &path);
 
 protected:
-    // 关窗口前问一句要不要保存（和「新建/打开」用同一套判断，closeEvent 里调 maybeSave()）
+    // 关窗口：每个有未保存修改的标签都问一遍（和关标签用的是同一个 maybeSave）
     void closeEvent(QCloseEvent *event) override;
 
 private slots:
-    void onNewFile();
+    void onNewFile();       // 多标签时代 = 新建一个标签
     void onOpenFile();
     void onSaveFile();
     void onSaveFileAs();
+    void onCloseTab();
+    void onNextTab();
+    void onPreviousTab();
 
-    // 版本历史（4.2.2）：查历史快照 / 与上一版对比 / 回滚到历史版本
+    // 版本历史（4.2.2）：查历史快照 / 与上一版对比 / 回滚到历史版本（都作用于当前标签）
     void onShowHistory();
     void onDiffWithPrevious();
     void onRollbackToVersion();
 
-    // 清空内存缓存（4.2.3）
+    // 清空当前文档的内存缓存（4.2.3）
     void onClearCache();
 
-    void onEditorTextChanged();
-    void onEditorScrolled();
-    void onPreviewClicked(int line);
-
-    // 编辑器报上来的光标位置（行列都从 1 起算）→ 状态栏
-    void onCursorMoved(int line, int column);
-
-    // FileManager 的信号
-    void onFileOpened(const QString &path);
-    void onFileSaved(const QString &path);
-    void onModificationChanged(bool modified);
-    void onReadOnlyDetected(const QString &path, const QString &reason);
+    // 标签切换（TabManager 的信号；nullptr = 已经没有标签了）
+    void onCurrentTabChanged(EditorWidget *editor);
 
 private:
-    // 把 .ui 建好的控件和外部对象（文件管理器、同步桥、WebChannel、渲染器）接起来
-    // （语法高亮和缩进宽度现在归 EditorWidget 自己管，见 src/business/editorwidget.h）
+    // 把 .ui 建好的控件和外部对象（同步桥、WebChannel、渲染器、标签页）接起来
     void initUi();
     // 菜单/工具栏/状态栏：这些用 .ui 表达不了（快捷键、动作、连接都是代码的事），所以留在代码里
     void initMenuBar();
     void initToolBar();
     void initStatusBar();
 
-    // 有未保存的修改时先问一句（保存/放弃/取消）。
-    // 返回 false = 用户取消，调用方必须**中止**当前操作，否则就把没保存的内容丢了。
-    bool maybeSave();
+    // ============================ 会话（一个标签 = 一个文档）============================
+
+    // 新建一个会话：建 FileManager + 让 TabManager 开一个新标签，并接上所有信号。返回新的编辑器。
+    EditorWidget *createSession();
+    void connectSession(EditorWidget *editor, FileManager *files);
+
+    EditorWidget *currentEditor() const;
+    FileManager *filesFor(const EditorWidget *editor) const;  // 找不到返回 nullptr
+    FileManager *currentFiles() const;
+    EditorWidget *editorFor(const FileManager *files) const;  // 反查（关标签时要用）
+
+    // 把文件名和修改标记刷到标签上（"笔记.md *"）
+    void updateTabLabel(FileManager *files);
+    // 让预览显示某个会话的内容。forceReload = 文档目录变了，需要重新加载模板。
+    void showSession(FileManager *files, bool forceReload);
+    // 回收一个会话（关标签时调用：把 FileManager 还回去，并从会话表里摘掉）
+    void removeSession(EditorWidget *editor);
+
+    // ---- 编辑器的信号（都显式带上"是哪个编辑器"，省得用 sender() 反查）----
+    void onEditorTextChanged(EditorWidget *editor);
+    void onEditorScrolled(EditorWidget *editor);
+    void onPreviewClicked(int line);
+    void onCursorMoved(EditorWidget *editor, int line, int column);
+
+    // ---- FileManager 的信号 ----
+    void onFileOpened(FileManager *files, const QString &path);
+    void onFileSaved(FileManager *files, const QString &path);
+    void onModificationChanged(FileManager *files, bool modified);
+    void onReadOnlyDetected(FileManager *files, const QString &reason);
+
+    // 有未保存的修改时先问一句（保存/放弃/取消）。返回 false = 用户取消，调用方必须中止。
+    bool maybeSave(FileManager *files);
+    // 保存某个会话（Ctrl+S 语义：没有路径时会转去另存为）。返回是否真的保存成功。
+    bool saveSession(FileManager *files, EditorWidget *editor);
+    bool saveSessionAs(FileManager *files, EditorWidget *editor);
 
     // 一个只读的文本窗口：历史列表和版本差异都用它显示
     // （差异可能几百行，需要等宽字体、不折行、可选可复制，QMessageBox 不够用）
     void showTextDialog(const QString &title, const QString &header, const QString &body);
 
     void updateWindowTitle();
-
-    // 状态栏右侧那行缓存状态（条数 / 命中次数 / 命中率）
+    // 状态栏右侧那行缓存状态（当前标签的缓存：条数 / 命中次数 / 命中率）
     void updateCacheStatus();
 
     Ui::MainWindow *ui = nullptr;
 
     markdown_editor::core::document::SyncBridge *m_bridge = nullptr;
 
-    // 文档内容 + 磁盘路径 + 脏标志 + 编码 + 只读状态（唯一事实来源，别再在别处存一份）
-    markdown_editor::core::storage::FileManager m_files;
+    // 会话表：编辑器 → 它的文档管理器。
+    // 两个对象的所有权都不在这里：EditorWidget 归标签页（TabManager 管理），
+    // FileManager 是主窗口的子对象（parent = this）。所以这张表只是"看一眼"，
+    // 关标签时要显式 removeSession()，否则会留下已销毁编辑器的悬空键。
+    QHash<EditorWidget *, FileManager *> m_sessions;
 
-    // 渲染管线：模板加载、页面持有、防抖、渲染、推送（4.1.4）
+    // 预览是所有标签共用的一个
     markdown_editor::core::document::PreviewRenderer m_renderer;
+    // 预览当前用的 baseUrl 目录：用来判断"换标签要不要重新加载模板"（不换目录就不重载，避免闪白）
+    QString m_previewBaseDir;
 
     QAction *m_newAction = nullptr;
     QAction *m_openAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
+    QAction *m_closeTabAction = nullptr;
+    QAction *m_nextTabAction = nullptr;
+    QAction *m_previousTabAction = nullptr;
     QAction *m_historyAction = nullptr;
     QAction *m_diffAction = nullptr;
     QAction *m_rollbackAction = nullptr;

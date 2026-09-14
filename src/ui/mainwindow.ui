@@ -23,9 +23,14 @@
       <property name="childrenCollapsible">
        <bool>false</bool>
       </property>
-      <widget class="EditorWidget" name="editor">
-       <property name="placeholderText">
-        <string>在这里写 Markdown…</string>
+      <!-- 左边是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
+           编辑器不在 .ui 里，因为"有几个"是运行期才知道的。 -->
+      <widget class="TabManager" name="tabManager">
+       <property name="tabsClosable">
+        <bool>true</bool>
+       </property>
+       <property name="movable">
+        <bool>true</bool>
        </property>
       </widget>
       <widget class="QWebEngineView" name="preview">
@@ -43,22 +48,21 @@
   <widget class="QStatusBar" name="statusbar"/>
  </widget>
  <customwidgets>
-  <!-- ★ 这就是"提升(promote)"：Designer 只认识 QtWidgets 里的类，
-       QWebEngineView 属于 QtWebEngineWidgets 模块，必须先在这里登记，
-       再用 <widget class="QWebEngineView"> 引用它。
-       uic 会照这里的 header 生成 #include "qwebengineview.h"。 -->
+  <!-- 自定义控件（提升）都写在这里：Designer 只认识 QtWidgets 里的类，
+       QWebEngineView 属于 QtWebEngineWidgets 模块，TabManager 属于我们的业务层，
+       都得先登记，再用 <widget class="..."> 引用。
+       uic 会照这里的 header 生成 #include，所以 ui 目标必须能通过链接找到这些头文件。 -->
   <customwidget>
    <class>QWebEngineView</class>
    <extends>QWidget</extends>
    <header>qwebengineview.h</header>
   </customwidget>
-  <!-- 同一套"提升"机制用在自定义控件上：EditorWidget 继承自 QPlainTextEdit，
-       所以 extends 写 QPlainTextEdit（Designer 才知道该把它当成什么来布局）。
-       header 是相对于项目的包含路径；ui 目标链接了 business，所以能找到 editorwidget.h。 -->
+  <!-- extends 写基类（Designer 才知道该按什么来布局）：
+       TabManager 继承 QTabWidget；ui 目标链接了 business，所以能找到 tabmanager.h。 -->
   <customwidget>
-   <class>EditorWidget</class>
-   <extends>QPlainTextEdit</extends>
-   <header>editorwidget.h</header>
+   <class>TabManager</class>
+   <extends>QTabWidget</extends>
+   <header>tabmanager.h</header>
   </customwidget>
  </customwidgets>
  <resources/>
