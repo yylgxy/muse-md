@@ -2,12 +2,14 @@
 
 #include "ui_mainwindow.h"  // uic 根据 mainwindow.ui 生成（AUTOUIC 负责，不用手工写）
 
-#include "editorwidget.h"  // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
+#include "editorwidget.h"       // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
+#include "editorworkbench.h"    // .ui 中央区那台"工作台"（分屏 + 预览 + 双向同步）
 #include "logger.h"
-#include "syncbridge.h"
+#include "previewrenderer.h"    // updateContent() 要用完整类型（渲染管线归工作台持有，这里只是借来用）
 #include "tabmanager.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QCloseEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -29,16 +31,12 @@
 #include <QTextDocument>
 #include <QToolBar>
 #include <QVBoxLayout>
-#include <QWebChannel>
-#include <QWebEnginePage>  // attach() 返回页面，交给 QWebChannel 当父对象（要完整类型才能转 QObject*）
-#include <QWebEngineView>
 
-using markdown_editor::core::document::PreviewRenderer;
-using markdown_editor::core::document::SyncBridge;
 using markdown_editor::core::storage::CacheManager;
 using markdown_editor::core::storage::VersionControl;
 // 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
 // 成员函数体里直接用短名字就行，不会和全局作用域冲突。
+// 预览渲染管线与同步桥也不在这里了：它们归 EditorWorkbench 所有。
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -68,28 +66,20 @@ void MainWindow::initUi()
 {
     // 这里是"控件建好之后的接线和配置"，不是布局 —— 所以仍然在代码里。
 
-    // 把预览视图交给渲染管线：它会给 view 换一个"能转发 console 日志"的页面，
-    // 并持有页面、负责模板加载和内容推送（4.1.4）
-    QWebEnginePage *previewPage = m_renderer.attach(ui->preview);
+    // ---- 把中央区的左右两块交给工作台 ----
+    // 工作台负责：左右分屏（QSplitter）、三种显示模式、编辑器与预览的双向同步。
+    // .ui 只描述"左边 tabManager、右边 preview"这个结构，行为都在 EditorWorkbench 里。
+    // 它内部会顺手做掉：给预览换页面（转发 JS 日志）、建 WebChannel、把同步桥注册给页面、
+    // 加载预览模板 —— 这些原来都挤在主窗口里。
+    if (!ui->workbench->setup(ui->tabManager, ui->preview)) {
+        LOG_ERROR("工作台初始化失败：编辑器侧或预览侧缺了一块");
+    }
 
-    // 左右各占一半（splitter 的初始比例是运行期设置，.ui 里表达不了）
-    ui->splitter->setStretchFactor(0, 1);
-    ui->splitter->setStretchFactor(1, 1);
-    ui->splitter->setSizes({600, 600});
-
-    // ---- WebChannel：把 C++ 的同步桥暴露给页面里的 JS ----
-    // 名字 "syncBridge" 必须和模板里 channel.objects.syncBridge 完全一致
-    m_bridge = new SyncBridge(this);
-    auto *channel = new QWebChannel(previewPage);
-    channel->registerObject(QStringLiteral("syncBridge"), m_bridge);
-    previewPage->setWebChannel(channel);
-
-    connect(m_bridge, &SyncBridge::previewClicked, this, &MainWindow::onPreviewClicked);
-
-    // 内容刚被推给页面 → 页面里的块是新的，滚动位置得重新对齐一次（用当前标签）
-    connect(&m_renderer, &PreviewRenderer::contentRendered, this, [this] {
-        onEditorScrolled(currentEditor());
-    });
+    // 预览被点击 → 工作台已经替我们把当前标签的光标跳过去了，这里只负责"界面表达"
+    connect(ui->workbench, &EditorWorkbench::editorLineClicked, this, &MainWindow::onEditorLineClicked);
+    // 显示模式变化 → 同步菜单勾选（也可能是代码里改的，所以以信号为准）
+    connect(ui->workbench, &EditorWorkbench::viewModeChanged, this, &MainWindow::onViewModeChanged);
+    onViewModeChanged(ui->workbench->viewMode());
 
     // ---- 标签页 ----
     // 关标签前"要不要保存"的对话框由主窗口提供：TabManager 只负责"问一声、按答案决定关不关"。
@@ -106,9 +96,6 @@ void MainWindow::initUi()
 
     // 切标签 → 换预览、换标题、换状态栏
     connect(ui->tabManager, &TabManager::currentEditorChanged, this, &MainWindow::onCurrentTabChanged);
-
-    // 先把预览外壳页面装起来（内容等页面加载完、渲染器自己补推）
-    m_renderer.loadTemplate(QString());
 }
 
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
@@ -169,6 +156,34 @@ void MainWindow::initMenuBar()
     m_previousTabAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Tab));
     connect(m_previousTabAction, &QAction::triggered, this, &MainWindow::onPreviousTab);
 
+    // ---- 视图菜单（5.3 的三种显示模式）----
+    // 用 QActionGroup 做成互斥：三个里同时只有一个被勾上，这就是"当前模式"的界面表达。
+    QMenu *viewMenu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
+    m_viewModeGroup = new QActionGroup(this);
+    m_viewModeGroup->setExclusive(true);
+
+    auto addViewAction = [&](const QString &text, const QKeySequence &shortcut, EditorWorkbench::ViewMode mode) {
+        QAction *action = viewMenu->addAction(text);
+        action->setCheckable(true);
+        action->setShortcut(shortcut);
+        m_viewModeGroup->addAction(action);
+        // 直接让工作台改模式；界面勾选状态由 viewModeChanged 信号统一刷新（见 onViewModeChanged）
+        connect(action, &QAction::triggered, this, [this, mode] {
+            ui->workbench->setViewMode(mode);
+        });
+        return action;
+    };
+
+    // Ctrl+1 / 2 / 3：和"分屏 / 仅编辑 / 仅预览"的顺序对应，好记
+    m_viewSplitAction =
+        addViewAction(QStringLiteral("左右分屏(&1)"), QKeySequence(Qt::CTRL | Qt::Key_1), EditorWorkbench::ViewMode::Split);
+    m_viewEditorOnlyAction = addViewAction(QStringLiteral("仅编辑(&2)"),
+                                           QKeySequence(Qt::CTRL | Qt::Key_2),
+                                           EditorWorkbench::ViewMode::EditorOnly);
+    m_viewPreviewOnlyAction = addViewAction(QStringLiteral("仅预览(&3)"),
+                                            QKeySequence(Qt::CTRL | Qt::Key_3),
+                                            EditorWorkbench::ViewMode::PreviewOnly);
+
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
     m_clearCacheAction = toolsMenu->addAction(QStringLiteral("清空内存缓存(&C)"));
@@ -226,10 +241,9 @@ void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
 {
     // 每个信号都用 lambda 把"是哪个编辑器/哪个文档"一起带上。
     // 这样槽函数不用去猜 sender()，也不怕将来加东西时连错对象。
+    // 注意滚动条不用在这里连：那是"编辑器 → 预览"的同步，归工作台的 setCurrentEditor() 管，
+    // 而且它会随当前标签切换，连在主窗口上会变成"所有标签一起抢预览"。
     connect(editor, &QPlainTextEdit::textChanged, this, [this, editor] { onEditorTextChanged(editor); });
-    connect(editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, editor] {
-        onEditorScrolled(editor);
-    });
     connect(editor, &EditorWidget::cursorMoved, this, [this, editor](int line, int column) {
         onCursorMoved(editor, line, column);
     });
@@ -303,17 +317,9 @@ void MainWindow::showSession(FileManager *files, bool forceReload)
 
     const QString dir = files->hasFilePath() ? QFileInfo(files->filePath()).absolutePath() : QString();
 
-    if (forceReload || dir != m_previewBaseDir) {
-        // 目录变了（或调用方明确要求）：重新加载模板，baseUrl 跟着换 ——
-        // 文档里的相对路径图片靠它才找得到
-        m_previewBaseDir = dir;
-        m_renderer.updateContent(files->text());
-        m_renderer.loadTemplate(dir);
-    } else {
-        // 只是换了个标签：只推内容，页面不重载。
-        // 重载页面会闪一下白屏、还会让 WebChannel 重连，切标签时手感很差。
-        m_renderer.updateContentNow(files->text());
-    }
+    // 布局、预览、同步全都交给工作台；主窗口只说"现在这个文档是什么、目录在哪"。
+    // 目录没变的工作台内部只推内容、不重载页面（切标签不会闪白，也不会让 WebChannel 重连）。
+    ui->workbench->showContent(files->text(), dir, forceReload);
 
     updateWindowTitle();
     updateCacheStatus();
@@ -478,59 +484,12 @@ void MainWindow::onEditorTextChanged(EditorWidget *editor)
 
     // 只有当前标签的改动才推到预览：别的标签改内容（比如程序自己填充）不该抢走预览
     if (editor == currentEditor()) {
-        // 防抖（300ms）在 PreviewRenderer 里：敲字时它会把这次更新一直往后推，
-        // 停下来之后才真正渲染一次。
-        m_renderer.updateContent(files->text());
+        // 防抖（300ms）在渲染管线里：敲字时它会把这次更新一直往后推，
+        // 停下来之后才真正渲染一次。渲染管线归工作台所有，这里只是借来用。
+        ui->workbench->renderer()->updateContent(files->text());
     }
 
     updateWindowTitle();
-}
-
-// ============================ 预览 → 编辑器 ============================
-
-void MainWindow::onPreviewClicked(int line)
-{
-    EditorWidget *editor = currentEditor();
-    if (editor == nullptr) {
-        return;
-    }
-
-    QTextDocument *doc = editor->document();
-    if (doc->blockCount() <= 0) {
-        return;
-    }
-
-    // 1 起算的行号 → QPlainTextEdit 的 blockNumber()（0 起算），并夹到合法范围，
-    // 防止"预览的行号比编辑器的行数还大"时越界
-    const int blockNumber = qBound(0, line - 1, doc->blockCount() - 1);
-
-    QTextCursor cursor(doc->findBlockByNumber(blockNumber));
-    editor->setTextCursor(cursor);
-    editor->centerCursor();  // 让目标行落在屏幕中间，而不是贴着边
-    editor->setFocus();
-
-    LOG_INFO("预览点击 → 编辑器跳到第 %1 行", line);
-}
-
-// ============================ 编辑器滚动 → 预览滚动 ============================
-
-void MainWindow::onEditorScrolled(EditorWidget *editor)
-{
-    if (editor == nullptr || m_bridge == nullptr) {
-        return;
-    }
-    // 后台标签的滚动不该带走预览
-    if (editor != currentEditor()) {
-        return;
-    }
-
-    // 当前最顶可见行 = 视口左上角那个位置对应的文本块。
-    // 注意：QPlainTextEdit::firstVisibleBlock() 是 protected 的，外部调不到，
-    // 所以走 cursorForPosition()（它接受的是视口坐标）。
-    const int blockNumber = editor->cursorForPosition(QPoint(0, 0)).blockNumber();
-    const int line = blockNumber + 1;  // blockNumber() 是 0 起算 → +1 变成"人类行号"
-
-    m_bridge->reportEditorScroll(line);  // → editorScrolled 信号 → JS scrollToLine()
 }
 
 // ============================ 标签切换 ============================
@@ -547,12 +506,35 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
     FileManager *files = filesFor(editor);
     showSession(files, false);  // 同目录时只推内容，不重载页面（不闪白）
 
+    // 告诉工作台"现在编辑的是这个编辑器"：它会接上这个编辑器的滚动条（并断开上一个），
+    // 顺便把预览滚到它的当前顶行 —— 这两件事原来散在主窗口里。
+    ui->workbench->setCurrentEditor(editor);
+
     // 状态栏的行列要换成这个标签的光标位置
     const QTextCursor cursor = editor->textCursor();
     onCursorMoved(editor, cursor.blockNumber() + 1, cursor.positionInBlock() + 1);
+}
 
-    // 让预览滚到这个标签的当前顶行（不然切过来还停在上一篇的位置上）
-    onEditorScrolled(editor);
+// 预览里被点了一下。光标是工作台跳的（它知道当前编辑器是谁），主窗口只负责界面表达。
+void MainWindow::onEditorLineClicked(int line)
+{
+    LOG_INFO("预览点击 → 编辑器跳到第 %1 行", line);
+    statusBar()->showMessage(QStringLiteral("已跳到第 %1 行").arg(line));
+}
+
+// ============================ 显示模式（5.3）============================
+
+void MainWindow::onViewModeChanged(EditorWorkbench::ViewMode mode)
+{
+    if (m_viewSplitAction != nullptr) {
+        m_viewSplitAction->setChecked(mode == EditorWorkbench::ViewMode::Split);
+    }
+    if (m_viewEditorOnlyAction != nullptr) {
+        m_viewEditorOnlyAction->setChecked(mode == EditorWorkbench::ViewMode::EditorOnly);
+    }
+    if (m_viewPreviewOnlyAction != nullptr) {
+        m_viewPreviewOnlyAction->setChecked(mode == EditorWorkbench::ViewMode::PreviewOnly);
+    }
 }
 
 void MainWindow::onCloseTab()
@@ -849,7 +831,7 @@ void MainWindow::onRollbackToVersion()
     // 注意 setPlainText 会触发 textChanged → setText(同样的内容) → 返回 false，
     // 所以预览要显式推一次（和打开文件时同样的道理）。
     editor->setPlainText(files->text());
-    m_renderer.updateContent(files->text());
+    ui->workbench->showContent(files->text(), ui->workbench->previewBaseDir(), false);
     updateTabLabel(files);
     updateWindowTitle();
     updateCacheStatus();

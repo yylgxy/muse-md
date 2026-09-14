@@ -172,11 +172,28 @@ target_link_libraries(test_tabmanager
 )
 add_test(NAME tabmanager COMMAND test_tabmanager)
 
+# ---------------- EditorWorkbench 契约测试（5.3）----------------
+# 需要 QApplication。这个测试**不创建 QWebEngineView**：预览侧传普通 QWidget 就够，
+# 分屏、三种显示模式、比例记忆、双向同步桥的接线全都能真验证 ——
+# 只有"页面里真的显示出来了"那一步要人工跑 GUI。
+# 链接 core_document 是因为要直接用 SyncBridge / PreviewRenderer 的类型和信号。
+add_executable(test_editorworkbench
+    test_editorworkbench.cpp
+)
+target_link_libraries(test_editorworkbench
+    business
+    core_document
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME editorworkbench COMMAND test_editorworkbench)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

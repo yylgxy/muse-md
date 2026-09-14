@@ -16,13 +16,16 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QHBoxLayout" name="centralLayout">
     <item>
-     <widget class="QSplitter" name="splitter">
+     <widget class="EditorWorkbench" name="workbench">
       <property name="orientation">
        <enum>Qt::Horizontal</enum>
       </property>
       <property name="childrenCollapsible">
        <bool>false</bool>
       </property>
+      <!-- 中央区是一台"工作台"（我们自己的 QSplitter 子类）：左右分屏、三种显示模式、
+           以及编辑器与预览之间的双向同步都归它管。.ui 只描述"左边放编辑器容器、
+           右边放预览"这个结构，行为都在 EditorWorkbench 里。 -->
       <!-- 左边是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
            编辑器不在 .ui 里，因为"有几个"是运行期才知道的。 -->
       <widget class="TabManager" name="tabManager">
@@ -63,6 +66,12 @@
    <class>TabManager</class>
    <extends>QTabWidget</extends>
    <header>tabmanager.h</header>
+  </customwidget>
+  <!-- EditorWorkbench 继承 QSplitter，所以 extends 写 QSplitter；header 指向它的头文件。 -->
+  <customwidget>
+   <class>EditorWorkbench</class>
+   <extends>QSplitter</extends>
+   <header>editorworkbench.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

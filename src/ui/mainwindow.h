@@ -5,16 +5,13 @@
 #include <QMainWindow>
 #include <QString>
 
+#include "editorworkbench.h"  // 显示模式的枚举类型出现在槽签名里，需要完整定义
 #include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
-#include "previewrenderer.h"  // 值成员，需要完整类型
 
 class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
+class QActionGroup;
 class QLabel;
-
-namespace markdown_editor::core::document {
-class SyncBridge;
-}
 
 // uic 会把 mainwindow.ui 编译成 ui_mainwindow.h，里面是 namespace Ui { class MainWindow; }，
 // 成员就是 .ui 里那些控件的指针（tabManager / preview / splitter / menubar / statusbar …）。
@@ -83,6 +80,12 @@ private slots:
     // 标签切换（TabManager 的信号；nullptr = 已经没有标签了）
     void onCurrentTabChanged(EditorWidget *editor);
 
+    // 预览里被点了一下（工作台已经跳好光标了，这里只记日志/更新状态栏）
+    void onEditorLineClicked(int line);
+
+    // 显示模式变了（可能是代码改的，也可能由菜单触发）→ 同步菜单里的勾选状态
+    void onViewModeChanged(EditorWorkbench::ViewMode mode);
+
 private:
     // 把 .ui 建好的控件和外部对象（同步桥、WebChannel、渲染器、标签页）接起来
     void initUi();
@@ -110,9 +113,9 @@ private:
     void removeSession(EditorWidget *editor);
 
     // ---- 编辑器的信号（都显式带上"是哪个编辑器"，省得用 sender() 反查）----
+    // 注意：滚动/点击这两个"编辑器 ↔ 预览"的同步现在归 EditorWorkbench 管，
+    // 所以这里只剩内容变化和光标位置。
     void onEditorTextChanged(EditorWidget *editor);
-    void onEditorScrolled(EditorWidget *editor);
-    void onPreviewClicked(int line);
     void onCursorMoved(EditorWidget *editor, int line, int column);
 
     // ---- FileManager 的信号 ----
@@ -137,18 +140,14 @@ private:
 
     Ui::MainWindow *ui = nullptr;
 
-    markdown_editor::core::document::SyncBridge *m_bridge = nullptr;
-
     // 会话表：编辑器 → 它的文档管理器。
     // 两个对象的所有权都不在这里：EditorWidget 归标签页（TabManager 管理），
     // FileManager 是主窗口的子对象（parent = this）。所以这张表只是"看一眼"，
     // 关标签时要显式 removeSession()，否则会留下已销毁编辑器的悬空键。
     QHash<EditorWidget *, FileManager *> m_sessions;
 
-    // 预览是所有标签共用的一个
-    markdown_editor::core::document::PreviewRenderer m_renderer;
-    // 预览当前用的 baseUrl 目录：用来判断"换标签要不要重新加载模板"（不换目录就不重载，避免闪白）
-    QString m_previewBaseDir;
+    // 注意：预览渲染管线、同步桥、分屏比例、显示模式都在 EditorWorkbench（ui->workbench）里，
+    // 主窗口只管文件与标签 —— 这是 5.3 把布局收进去之后的结果。
 
     QAction *m_newAction = nullptr;
     QAction *m_openAction = nullptr;
@@ -161,6 +160,10 @@ private:
     QAction *m_diffAction = nullptr;
     QAction *m_rollbackAction = nullptr;
     QAction *m_clearCacheAction = nullptr;
+    QAction *m_viewSplitAction = nullptr;        // 视图：左右分屏
+    QAction *m_viewEditorOnlyAction = nullptr;   // 视图：仅编辑
+    QAction *m_viewPreviewOnlyAction = nullptr;  // 视图：仅预览
+    QActionGroup *m_viewModeGroup = nullptr;     // 三个显示模式互斥
 
     QLabel *m_cacheLabel = nullptr;   // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
     QLabel *m_cursorLabel = nullptr;  // 状态栏上的"行 x，列 y"（来自 EditorWidget::cursorMoved）
