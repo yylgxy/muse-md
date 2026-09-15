@@ -9,6 +9,7 @@
 #include "exporter.h"         // 5.6：导出器是整个窗口的一个成员（按值持有）
 #include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "recentfiles.h"      // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
+#include "thememanager.h"     // 5.7：主题（槽签名里用它的枚举）
 
 class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
@@ -87,6 +88,9 @@ private slots:
 
     // 插入代码块（5.7）：先选语言，再把围栏插到当前光标处（预览会立刻按这种语言着色）
     void onInsertCodeBlock();
+
+    // 主题切换（5.7）：把新主题应用到所有编辑器和预览区（菜单栏等控件由 QSS 自动跟）
+    void onThemeChanged(ThemeManager::Theme theme);
 
     // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
     void onSearchResultActivated(const QString &filePath, int line);
@@ -206,6 +210,9 @@ private:
     QActionGroup *m_viewModeGroup = nullptr;     // 三个显示模式互斥
     QAction *m_showFileTreeAction = nullptr;     // 视图：显示/隐藏文件树侧边栏
     QAction *m_searchAction = nullptr;           // 视图：全文搜索面板（Ctrl+Shift+F）
+    QAction *m_themeLightAction = nullptr;       // 视图 → 主题：亮色
+    QAction *m_themeDarkAction = nullptr;        // 视图 → 主题：暗色
+    QActionGroup *m_themeGroup = nullptr;        // 两个主题互斥
 
     QMenu *m_recentMenu = nullptr;  // 文件 →「最近打开」子菜单（内容随列表重建）
 

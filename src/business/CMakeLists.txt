@@ -17,6 +17,8 @@ add_library(business STATIC
     searchpanel.cpp
     exporter.h
     exporter.cpp
+    thememanager.h
+    thememanager.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。

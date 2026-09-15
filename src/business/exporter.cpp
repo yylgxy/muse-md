@@ -68,7 +68,7 @@ QString Exporter::exportOverrideStyleSheet()
     // 这段必须放在预览样式**之后**：同选择器、同优先级时后写的赢。
     return QStringLiteral(
         "/* ---- 导出专用：把预览里「给屏幕看」的东西收回来 ---- */\n"
-        "body { padding: 0; margin: 0; background: #ffffff; }\n"
+        "body { padding: 0; margin: 0; background: var(--bg); }\n"
         "#content { max-width: 920px; margin: 0 auto; padding: 28px 36px 40px; }\n"
         "\n"
         "@media print {\n"
@@ -80,6 +80,17 @@ QString Exporter::exportOverrideStyleSheet()
         "  pre { border: 1px solid #d0d7de; }\n"
         "  /* 纸上看不出蓝色，链接改成下划线 */\n"
         "  a { color: inherit; text-decoration: underline; }\n"
+        "  /* ★ 打印一律用浅色：暗色主题打出来是一片黑，费墨而且难读。\n"
+        "     选择器和 html[data-theme=\"dark\"] 一样具体、但写在后面，所以能压过暗色那套变量。 */\n"
+        "  :root, html[data-theme=\"dark\"] {\n"
+        "    --bg: #ffffff; --fg: #24292f; --muted: #57606a; --border: #eaecef;\n"
+        "    --border-strong: #d0d7de; --stripe: #f6f8fa; --link: #24292f; --quote-bar: #d0d7de;\n"
+        "    --code-bg: #f6f8fa; --code-fg: #24292f;\n"
+        "    --tok-comment: #6a737d; --tok-keyword: #d73a49; --tok-type: #6f42c1; --tok-literal: #005cc5;\n"
+        "    --tok-builtin: #005cc5; --tok-string: #032f62; --tok-number: #005cc5; --tok-function: #6f42c1;\n"
+        "    --tok-attr: #005cc5; --tok-tag: #22863a; --tok-operator: #d73a49; --tok-meta: #6a737d;\n"
+        "    --tok-add-fg: #22863a; --tok-add-bg: #f0fff4; --tok-del-fg: #b31d28; --tok-del-bg: #ffeef0;\n"
+        "  }\n"
         "}\n");
 }
 
@@ -104,28 +115,31 @@ QString Exporter::defaultTitleFor(const QString &filePath)
     return name.isEmpty() ? QStringLiteral("未命名") : name;
 }
 
-QString Exporter::standaloneHtml(const QString &markdown, const QString &title)
+QString Exporter::standaloneHtml(const QString &markdown, const QString &title, const QString &themeId)
 {
-    // 和预览走同一条渲染 + 高亮路径：导出文件里的代码块配色和预览里一模一样
+    // 和预览一样：渲染 → 代码高亮（三条路共用同一个结果）
     const QString body = CodeHighlighter::highlightCodeBlocks(MarkdownParser::parseToHtml(markdown));
     const QString shownTitle = escapedTitle(title.trimmed().isEmpty() ? QStringLiteral("未命名") : title);
+    // 只认两个值：它会被写进 HTML 属性，先收窄
+    const QString theme = (themeId.compare(QLatin1String("dark"), Qt::CaseInsensitive) == 0) ? QStringLiteral("dark")
+                                                                                             : QStringLiteral("light");
 
     // 样式一律内联在 <style> 里（这就是"独立文件"的含义：拷到任何地方、断网也照样好看）。
     // 没有 <script>：导出的文件不需要和 C++ 通话，带上 WebChannel 反而会报错。
     return QStringLiteral("<!DOCTYPE html>\n"
-                          "<html lang=\"zh-CN\">\n"
+                          "<html lang=\"zh-CN\" data-theme=\"%1\">\n"
                           "<head>\n"
                           "<meta charset=\"utf-8\">\n"
                           "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
                           "<meta name=\"generator\" content=\"Markdown 编辑器 (muse-md)\">\n"
-                          "<title>%1</title>\n"
-                          "<style>\n%2\n\n%3\n</style>\n"
+                          "<title>%2</title>\n"
+                          "<style>\n%3\n\n%4\n</style>\n"
                           "</head>\n"
                           "<body>\n"
-                          "<div id=\"content\">\n%4</div>\n"
+                          "<div id=\"content\">\n%5</div>\n"
                           "</body>\n"
                           "</html>\n")
-        .arg(shownTitle, previewStyleSheet(), exportOverrideStyleSheet(), body);
+        .arg(theme, shownTitle, previewStyleSheet(), exportOverrideStyleSheet(), body);
 }
 
 // ============================ 图片内联 ============================
@@ -244,10 +258,11 @@ QPageLayout Exporter::buildPageLayout(const PdfOptions &options)
 QString Exporter::buildDocumentHtml(const QString &markdown,
                                     const QString &baseDir,
                                     const QString &title,
+                                    const QString &themeId,
                                     bool inlineImages,
                                     HtmlResult *result) const
 {
-    QString html = standaloneHtml(markdown, title);
+    QString html = standaloneHtml(markdown, title, themeId);
     if (inlineImages) {
         html = inlineLocalImages(html, baseDir, result);
     }
@@ -284,7 +299,7 @@ bool Exporter::exportHtml(const QString &markdown,
 
     HtmlResult local;
     const QString title = options.title.trimmed().isEmpty() ? defaultTitleFor(targetPath) : options.title;
-    const QString html = buildDocumentHtml(markdown, baseDir, title, options.inlineImages, &local);
+    const QString html = buildDocumentHtml(markdown, baseDir, title, options.themeId, options.inlineImages, &local);
 
     // 目录不存在就建：用户在"另存为"里手打一个还不存在的路径很常见
     const QString dir = QFileInfo(targetPath).absolutePath();
@@ -361,6 +376,7 @@ void Exporter::exportPdf(const QString &markdown,
     const QString html = buildDocumentHtml(markdown,
                                            baseDir,
                                            title.trimmed().isEmpty() ? defaultTitleFor(targetPath) : title,
+                                           options.themeId,
                                            true,
                                            &ignored);
     m_pdfTempFile->write(html.toUtf8());

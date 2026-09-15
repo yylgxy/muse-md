@@ -80,14 +80,11 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     // ---- 2. 行号栏 ----
     m_lineNumberArea = new LineNumberArea(this);
 
-    // ---- 3. 颜色全部从调色板推导 ----
-    // 这样亮色/暗色主题、以及用户在系统里改配色，都不用改这里的代码。
-    const QPalette pal = palette();
-    m_gutterBackground = pal.color(QPalette::AlternateBase);
-    m_lineNumberColor = pal.color(QPalette::PlaceholderText);
-    m_currentLineNumberColor = pal.color(QPalette::Text);
-    m_currentLineColor = pal.color(QPalette::Highlight);
-    m_currentLineColor.setAlpha(40);  // 当前行高亮要"看得见但不抢眼"
+    // ---- 3. 主题配色 ----
+    // 颜色来自 ThemePalette（亮色起步）：行号栏和高亮器都用同一份，
+    // 切主题时 ThemeManager 会推进来新的一份（见 setThemePalette）。
+    // 编辑器控件的背景/文字色不在这里设 —— 那是 QSS 的事（resources/styles/*.qss）。
+    setThemePalette(ThemePalette::light());
 
     applyIndentWidth();
 
@@ -126,6 +123,43 @@ void EditorWidget::applyIndentWidth()
 {
     // 制表位宽度按"n 个空格的宽度"算：文档里已经存在的制表符也能显示得合理
     setTabStopDistance(m_indentWidth * fontMetrics().horizontalAdvance(QLatin1Char(' ')));
+}
+
+// ============================================================================
+// 主题
+// ============================================================================
+
+void EditorWidget::setThemePalette(const ThemePalette &palette)
+{
+    if (m_themePalette.editorBackground == palette.editorBackground
+        && m_themePalette.gutterBackground == palette.gutterBackground && m_themePalette.heading == palette.heading
+        && m_themePalette.editorForeground == palette.editorForeground) {
+        return;  // 同一套配色：不做任何事（主题重复应用不该引起重绘）
+    }
+
+    m_themePalette = palette;
+
+    m_gutterBackground = palette.gutterBackground;
+    m_lineNumberColor = palette.gutterText;
+    m_currentLineNumberColor = palette.currentLineNumberText;
+    m_currentLineColor = palette.currentLineHighlight;
+    m_currentLineColor.setAlpha(40);  // 当前行高亮要"看得见但不抢眼"
+
+    if (m_highlight != nullptr) {
+        m_highlight->setPalette(palette);  // 语法高亮重建规则并重新上一遍色
+    }
+
+    // 行号栏和当前行高亮都是自己画的：重绘一次即可
+    if (m_lineNumberArea != nullptr) {
+        m_lineNumberArea->update();
+    }
+    refreshCurrentLine();
+}
+
+// 返回类型写全限定名：C++ 解析返回类型时还没进入 EditorWidget 的作用域（见上面的别名说明）
+markdown_editor::core::document::ThemePalette EditorWidget::themePalette() const
+{
+    return m_themePalette;
 }
 
 // ============================================================================

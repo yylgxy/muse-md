@@ -58,6 +58,9 @@ public:
         bool inlineImages = true;
         // 文档标题（进 <title>）。留空则用文件名。
         QString title;
+        // 主题（"light"/"dark"）：导出的 HTML 会带上 data-theme，在浏览器里就是当前主题的样子。
+        // 由调用方（主窗口）从 ThemeManager 取，导出器本身不认识主题管理器 —— 好测。
+        QString themeId = QStringLiteral("light");
     };
 
     // PDF 导出选项
@@ -66,6 +69,9 @@ public:
         QPageSize::PageSizeId pageSize = QPageSize::A4;
         QPageLayout::Orientation orientation = QPageLayout::Portrait;
         qreal marginMm = 12.0;  // 四边统一的边距（毫米）
+        // 主题同上。注意：**打印时会被强制换成浅色**（见 exportOverrideStyleSheet）——
+        // 深色底打出来是一片黑，既费墨又难读。
+        QString themeId = QStringLiteral("light");
     };
 
     // HTML 导出的统计（给界面报一句"内联了几张图"）
@@ -90,7 +96,10 @@ public:
     // 把 Markdown 渲染成一份**完整、独立**的 HTML 文档：
     // <!DOCTYPE html> + meta charset + <title> + 内联样式 + 正文。
     // 注意：**不含**预览模板里的 WebChannel 脚本 —— 导出的文件不需要和 C++ 通话。
-    static QString standaloneHtml(const QString &markdown, const QString &title);
+    // themeId 写进 <html data-theme="…">：浏览器打开时就是那个主题（颜色全是 CSS 变量）。
+    static QString standaloneHtml(const QString &markdown,
+                                 const QString &title,
+                                 const QString &themeId = QStringLiteral("light"));
 
     // 标题转义（文件名叫 <未命名> 也不该把 HTML 弄坏）
     static QString escapedTitle(const QString &raw);
@@ -140,10 +149,11 @@ private slots:
     void onPdfTimeout();
 
 private:
-    // 两种导出共用的准备步骤：Markdown → 完整 HTML（图片该内联就内联）
+    // 两种导出共用的准备步骤：Markdown → 完整 HTML（图片该内联就内联、主题按参数）
     QString buildDocumentHtml(const QString &markdown,
                               const QString &baseDir,
                               const QString &title,
+                              const QString &themeId,
                               bool inlineImages,
                               HtmlResult *result) const;
 

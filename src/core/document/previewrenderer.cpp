@@ -154,6 +154,8 @@ void PreviewRenderer::onLoadFinished(bool ok)
 
     // 页面就绪：把最近一次要求渲染的内容补推上去（模板刚换、或加载期间来的编辑都在这里兑现）
     pushNow();
+    // 主题也要补一次：新页面默认是亮色，C++ 侧当前可能是暗色
+    applyThemeToPage();
     emit pageReadyChanged(true);
 }
 
@@ -239,6 +241,39 @@ int PreviewRenderer::debounceInterval() const
 bool PreviewRenderer::isPageReady() const
 {
     return m_ready;
+}
+
+// ============================ 主题（5.7）============================
+
+void PreviewRenderer::applyTheme(const QString &themeId)
+{
+    // 只认两个值：这个字符串最后会拼进 JS，先收窄比事后转义更省心
+    const QString wanted = (themeId.compare(QLatin1String("dark"), Qt::CaseInsensitive) == 0)
+                               ? QStringLiteral("dark")
+                               : QStringLiteral("light");
+    if (wanted == m_themeId) {
+        return;  // 同一套主题：不重复注入（重复注入 = 多余的重绘）
+    }
+
+    m_themeId = wanted;
+    applyThemeToPage();
+}
+
+QString PreviewRenderer::themeId() const
+{
+    return m_themeId;
+}
+
+void PreviewRenderer::applyThemeToPage()
+{
+    if (m_page.isNull()) {
+        return;  // 页面没附着：只记住主题，等 loadFinished 之后再推给它
+    }
+
+    // 用 typeof 挡一下：页面可能还在加载（applyTheme 还没定义），
+    // 那样会往控制台丢一条报错 —— 加载完成后 onLoadFinished 会再调一次，主题不会丢。
+    m_page->runJavaScript(
+        QStringLiteral("if (typeof applyTheme === 'function') { applyTheme('%1'); }").arg(m_themeId));
 }
 
 bool PreviewRenderer::hasPendingUpdate() const

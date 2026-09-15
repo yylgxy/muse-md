@@ -7,6 +7,8 @@ add_library(core_document STATIC
     markdowndocument.cpp
     markdownhighlighter.h
     markdownhighlighter.cpp
+    themepalette.h
+    themepalette.cpp
     codehighlighter.h
     codehighlighter.cpp
     syncbridge.h

@@ -12,6 +12,7 @@
 #include "recentfiles.h"        // 5.4.2：最近打开的文件列表
 #include "searchpanel.h"        // 5.5：全文搜索面板（.ui 里就是一个 SearchPanel）
 #include "tabmanager.h"
+#include "thememanager.h"      // 5.7：亮暗主题（单例）
 
 #include <QAction>
 #include <QActionGroup>
@@ -47,6 +48,8 @@ using markdown_editor::core::storage::VersionControl;
 using markdown_editor::core::document::PreviewRenderer;
 // 代码高亮（5.7）："插入代码块"的语言列表和显示名都来自它
 using markdown_editor::core::document::CodeHighlighter;
+// 主题配色（5.7）：ThemeManager 是全局命名空间的类，但它返回的配色表在 core::document 里
+using markdown_editor::core::document::ThemePalette;
 // 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
 // 成员函数体里直接用短名字就行，不会和全局作用域冲突。
 // 预览渲染管线与同步桥也不在这里了：它们归 EditorWorkbench 所有。
@@ -62,6 +65,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     initMenuBar();
     initToolBar();
     initStatusBar();
+
+    // ---- 主题（5.7）----
+    // 先接信号再接"应用保存的主题"：这样启动时那一次应用也会走到 onThemeChanged，
+    // 编辑器和预览区就能用同一个入口同步好（不需要在构造函数里再手动同步一遍）。
+    connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, &MainWindow::onThemeChanged);
+    ThemeManager::instance().applySavedTheme();
 
     // 最近文件（5.4.2）：先把上次退出时的列表读回来，再据此建出菜单。
     // 菜单也要能自更新 —— changed() 是唯一的"列表变了"通知（加一条、删一条、清空都会发）。
@@ -321,6 +330,29 @@ void MainWindow::initMenuBar()
     // 不会来回递归：setChecked 只有在状态真的变了时才发 toggled。
     connect(ui->searchDock, &QDockWidget::visibilityChanged, m_searchAction, &QAction::setChecked);
 
+    // ---- 主题（5.7）----
+    // 视图 → 主题 → 亮色 / 暗色。切换只调 ThemeManager：它负责 QSS + 调色板 + 落盘 + 发信号，
+    // 本窗口和编辑器、预览区都只是"响应者"，不需要互相知道对方也要换色。
+    QMenu *themeMenu = viewMenu->addMenu(QStringLiteral("主题(&T)"));
+    m_themeGroup = new QActionGroup(this);
+    m_themeGroup->setExclusive(true);
+
+    m_themeLightAction = themeMenu->addAction(QStringLiteral("亮色(&L)"));
+    m_themeLightAction->setCheckable(true);
+    m_themeGroup->addAction(m_themeLightAction);
+    connect(m_themeLightAction, &QAction::triggered, this, [this] {
+        Q_UNUSED(this);
+        ThemeManager::instance().setTheme(ThemeManager::Theme::Light);
+    });
+
+    m_themeDarkAction = themeMenu->addAction(QStringLiteral("暗色(&D)"));
+    m_themeDarkAction->setCheckable(true);
+    m_themeGroup->addAction(m_themeDarkAction);
+    connect(m_themeDarkAction, &QAction::triggered, this, [this] {
+        Q_UNUSED(this);
+        ThemeManager::instance().setTheme(ThemeManager::Theme::Dark);
+    });
+
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
     m_clearCacheAction = toolsMenu->addAction(QStringLiteral("清空内存缓存(&C)"));
@@ -374,6 +406,10 @@ EditorWidget *MainWindow::createSession()
     // FileManager 的父对象是主窗口：即使某个标签被关掉忘了回收，也不会泄漏到进程结束
     auto *files = new FileManager(this);
     EditorWidget *editor = ui->tabManager->addEditorTab();
+
+    // 新标签也要跟上当前主题：EditorWidget 自己是从亮色起步的，
+    // 开机时如果用户用的是暗色主题，这里得把它按当前主题刷一遍。
+    editor->setThemePalette(ThemeManager::editorPalette(ThemeManager::instance().theme()));
 
     m_sessions.insert(editor, files);
     connectSession(editor, files);
@@ -1176,10 +1212,18 @@ void MainWindow::exportCurrentDocument(bool asPdf)
     const ExportDialog::Request request = dialog.request();
     const QString baseDir = files->hasFilePath() ? QFileInfo(files->filePath()).absolutePath() : QString();
 
+    // 导出跟随当前主题（5.7）：暗色主题下导出的 HTML 在浏览器里也是暗的。
+    // PDF 例外 —— 打印样式会强制浅色（见 Exporter::exportOverrideStyleSheet）。
+    const QString themeId = ThemeManager::themeId(ThemeManager::instance().theme());
+    Exporter::HtmlOptions htmlOptions = request.html;
+    htmlOptions.themeId = themeId;
+    Exporter::PdfOptions pdfOptions = request.pdf;
+    pdfOptions.themeId = themeId;
+
     if (request.format == ExportDialog::Format::Html) {
         Exporter::HtmlResult result;
         QString error;
-        if (!m_exporter.exportHtml(files->text(), baseDir, request.targetPath, request.html, &result, &error)) {
+        if (!m_exporter.exportHtml(files->text(), baseDir, request.targetPath, htmlOptions, &result, &error)) {
             QMessageBox::warning(this, QStringLiteral("导出失败"), error);
             return;
         }
@@ -1199,7 +1243,7 @@ void MainWindow::exportCurrentDocument(bool asPdf)
 
     // PDF：异步。先给一句"正在生成"，结果由 pdfExported 信号带回来（见构造函数里的连接）。
     statusBar()->showMessage(QStringLiteral("正在生成 PDF：%1 …").arg(QDir::toNativeSeparators(request.targetPath)));
-    m_exporter.exportPdf(files->text(), baseDir, request.targetPath, request.pdf, request.title);
+    m_exporter.exportPdf(files->text(), baseDir, request.targetPath, pdfOptions, request.title);
 }
 
 // 导出完成后问一句"要不要现在打开看看"。
@@ -1268,6 +1312,39 @@ void MainWindow::onInsertCodeBlock()
     statusBar()->showMessage(QStringLiteral("已插入 %1 代码块：在中间那行写代码，预览会按这种语言着色")
                                  .arg(CodeHighlighter::displayNameFor(language)),
                              8000);
+}
+
+// ============================ 主题（5.7）============================
+
+// 主题一变，本窗口负责三件事：
+//   1. 菜单上的勾跟着走（主题也可能是别处改的，比如启动时读配置）
+//   2. 每个编辑器的语法配色 + 行号栏换色（QSS 管不到这些，它们是画出来的）
+//   3. 预览区换主题（改 CSS 变量，**不重载页面** —— 所以不闪白、不丢滚动位置）
+// 菜单栏/工具栏/标签页/状态栏/文件树/搜索面板这些由 QSS 自动跟，这里一行都不用写。
+void MainWindow::onThemeChanged(ThemeManager::Theme theme)
+{
+    if (m_themeLightAction != nullptr) {
+        m_themeLightAction->setChecked(theme == ThemeManager::Theme::Light);
+    }
+    if (m_themeDarkAction != nullptr) {
+        m_themeDarkAction->setChecked(theme == ThemeManager::Theme::Dark);
+    }
+
+    const ThemePalette palette = ThemeManager::editorPalette(theme);
+    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
+        if (it.key() != nullptr) {
+            it.key()->setThemePalette(palette);
+        }
+    }
+
+    if (ui->workbench != nullptr && ui->workbench->renderer() != nullptr) {
+        ui->workbench->renderer()->applyTheme(ThemeManager::themeId(theme));
+    }
+
+    statusBar()->showMessage(QStringLiteral("已切换到%1主题")
+                                 .arg(theme == ThemeManager::Theme::Dark ? QStringLiteral("暗色")
+                                                                         : QStringLiteral("亮色")),
+                             3000);
 }
 
 // ============================ 缓存（4.2.3）============================

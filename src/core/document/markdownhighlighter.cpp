@@ -13,45 +13,70 @@ constexpr int kInCodeBlock = 1;
 }  // namespace
 
 MarkdownHighlighter::MarkdownHighlighter(QTextDocument *parent)
-    : QSyntaxHighlighter(parent)
+    : QSyntaxHighlighter(parent), m_palette(ThemePalette::light())
 {
-    // ========== 1. 各类元素的样式 ==========
-    // 说明：这些颜色现在是写死的（浅色主题下看着还行）。深色主题、用户自定义配色，
-    // 以后再改成从配置读；那时把这些 QTextCharFormat 提升为成员、并加一个
-    // rebuildRules() 重新构建 m_rules 即可（注意：改成员不会自动影响已注册的规则，
-    // 因为规则里存的是当时的副本）。
+    rebuildFormats();
+}
+
+void MarkdownHighlighter::setPalette(const ThemePalette &palette)
+{
+    if (palette.editorBackground == m_palette.editorBackground && palette.heading == m_palette.heading
+        && palette.codeBlockBackground == m_palette.codeBlockBackground && palette.link == m_palette.link
+        && palette.editorForeground == m_palette.editorForeground) {
+        // 这几项相同就认为"还是同一套"：省掉一次全文重新高亮。
+        // （不需要逐字段比 —— 主题只有两套，且两套之间首字段一定不同。）
+        return;
+    }
+
+    m_palette = palette;
+    rebuildFormats();
+    rehighlight();  // 立刻把整个文档按新配色重画
+}
+
+// 注意返回类型要写全限定名：C++ 解析返回类型时还没进入 MarkdownHighlighter 的作用域，
+// 所以类里那个 ThemePalette 别名在这里是看不见的（参数类型在限定名之后，反而能用短名字）。
+markdown_editor::core::document::ThemePalette MarkdownHighlighter::palette() const
+{
+    return m_palette;
+}
+
+void MarkdownHighlighter::rebuildFormats()
+{
+    // ========== 1. 各类元素的样式（颜色全部来自配色表）==========
     QTextCharFormat headerFormat;
-    headerFormat.setForeground(Qt::blue);
+    headerFormat.setForeground(m_palette.heading);
     headerFormat.setFontWeight(QFont::Bold);
 
     QTextCharFormat boldFormat;
-    boldFormat.setForeground(QColor(180, 0, 0));
+    boldFormat.setForeground(m_palette.bold);
     boldFormat.setFontWeight(QFont::Bold);
 
     QTextCharFormat italicFormat;
-    italicFormat.setForeground(Qt::darkGreen);
+    italicFormat.setForeground(m_palette.italic);
     italicFormat.setFontItalic(true);
 
     QTextCharFormat codeInlineFormat;
-    codeInlineFormat.setForeground(Qt::darkGray);
-    codeInlineFormat.setBackground(QColor(240, 240, 240));
+    codeInlineFormat.setForeground(m_palette.inlineCodeForeground);
+    codeInlineFormat.setBackground(m_palette.inlineCodeBackground);
 
     QTextCharFormat linkFormat;
-    linkFormat.setForeground(Qt::blue);
+    linkFormat.setForeground(m_palette.link);
     linkFormat.setFontUnderline(true);
 
     QTextCharFormat blockQuoteFormat;
-    blockQuoteFormat.setForeground(Qt::darkGray);
+    blockQuoteFormat.setForeground(m_palette.blockQuote);
 
     QTextCharFormat listFormat;
-    listFormat.setForeground(QColor(128, 0, 128));
+    listFormat.setForeground(m_palette.listMarker);
 
-    m_codeBlockFormat.setForeground(Qt::darkGray);
-    m_codeBlockFormat.setBackground(QColor(245, 245, 245));
+    m_codeBlockFormat = QTextCharFormat();
+    m_codeBlockFormat.setForeground(m_palette.codeBlockForeground);
+    m_codeBlockFormat.setBackground(m_palette.codeBlockBackground);
 
     // ========== 2. 注册规则 ==========
     // 顺序有讲究：**先整行、后局部** —— 因为同一个字符后面 setFormat 的会覆盖前面的，
     // 否则"标题整行蓝色"会把标题里的 **粗体** 也吃掉。
+    m_rules.clear();
 
     // 标题：整行（CommonMark 要求 # 后面有空格）
     m_rules.append({QRegularExpression(QStringLiteral("^\\s*#{1,6}\\s+.*$")), headerFormat});

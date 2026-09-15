@@ -272,11 +272,29 @@ target_link_libraries(test_codehighlighter
 )
 add_test(NAME codehighlighter COMMAND test_codehighlighter)
 
+# ---------------- ThemeManager 契约测试（5.7）----------------
+# 需要 QApplication（QSS/调色板是应用级的东西，而且要构造真的控件看颜色）。
+# 带上 qrc：两份 QSS 就是从 resources/styles/ 里读的 —— 测试会检查它们真的能读到、
+# 选择器清单一致、以及和 ThemePalette（C++ 配色表）的编辑器底色没打架。
+# 注意：ConfigManager 会被指向临时文件，不碰用户真实的 config.ini。
+add_executable(test_thememanager
+    test_thememanager.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
+)
+target_link_libraries(test_thememanager
+    business
+    infrastructure
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME thememanager COMMAND test_thememanager)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

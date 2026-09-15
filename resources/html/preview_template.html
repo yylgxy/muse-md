@@ -17,34 +17,108 @@
 -->
 
 <style>
+  /* ==========================================================================
+     主题变量（5.7）
+     --------------------------------------------------------------------------
+     整个预览页的颜色都从这里取。于是"切主题"= 改 <html> 上的一个 data-theme
+     属性（见下面的 applyTheme()），**不需要重新加载页面** —— 重载会闪一下白，
+     还会让 WebChannel 重连，正是主题切换最不该有的体验。
+
+     亮暗两套色值刻意和编辑器那边的 ThemePalette（C++）以及 resources/styles/*.qss
+     保持一致的观感：同一个应用里，预览和编辑器不该像是两个软件。
+     ========================================================================== */
+  :root {
+    /* 页面 */
+    --bg: #ffffff;
+    --fg: #24292f;
+    --muted: #57606a;
+    --border: #eaecef;
+    --border-strong: #d0d7de;
+    --stripe: #f6f8fa;
+    --link: #0969da;
+    --quote-bar: #d0d7de;
+    --selection: #b6d7ff;
+    /* 代码 */
+    --code-bg: #f6f8fa;
+    --code-fg: #24292f;
+    --tok-comment: #6a737d;
+    --tok-keyword: #d73a49;
+    --tok-type: #6f42c1;
+    --tok-literal: #005cc5;
+    --tok-builtin: #005cc5;
+    --tok-string: #032f62;
+    --tok-number: #005cc5;
+    --tok-function: #6f42c1;
+    --tok-attr: #005cc5;
+    --tok-tag: #22863a;
+    --tok-operator: #d73a49;
+    --tok-meta: #6a737d;
+    --tok-add-fg: #22863a;
+    --tok-add-bg: #f0fff4;
+    --tok-del-fg: #b31d28;
+    --tok-del-bg: #ffeef0;
+  }
+
+  html[data-theme="dark"] {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --border: #21262d;
+    --border-strong: #30363d;
+    --stripe: #161b22;
+    --link: #58a6ff;
+    --quote-bar: #30363d;
+    --selection: #1f6feb;
+    --code-bg: #161b22;
+    --code-fg: #c9d1d9;
+    --tok-comment: #8b949e;
+    --tok-keyword: #ff7b72;
+    --tok-type: #d2a8ff;
+    --tok-literal: #79c0ff;
+    --tok-builtin: #79c0ff;
+    --tok-string: #a5d6ff;
+    --tok-number: #79c0ff;
+    --tok-function: #d2a8ff;
+    --tok-attr: #79c0ff;
+    --tok-tag: #7ee787;
+    --tok-operator: #ff7b72;
+    --tok-meta: #8b949e;
+    --tok-add-fg: #7ee787;
+    --tok-add-bg: #12261e;
+    --tok-del-fg: #ffa198;
+    --tok-del-bg: #25171c;
+  }
+
   /* ---------- 页面基础 ---------- */
+  html, body { background: var(--bg); }
   body {
     margin: 0;
     padding: 28px 36px 60vh;      /* 底部留白：最后一段也能滚到顶部 */
-    background: #ffffff;
-    color: #24292f;
+    color: var(--fg);
     font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
     font-size: 16px;
     line-height: 1.75;
     word-wrap: break-word;
   }
 
+  ::selection { background: var(--selection); }
+
   /* 正文限宽：别让一行的文字横跨整个屏幕 */
   #content { max-width: 920px; margin: 0 auto; }
 
   /* ---------- 标题 ---------- */
   h1, h2, h3, h4, h5, h6 { font-weight: 600; line-height: 1.3; margin: 1.5em 0 .6em; }
-  h1 { font-size: 1.9em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
-  h2 { font-size: 1.45em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+  h1 { font-size: 1.9em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+  h2 { font-size: 1.45em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
   h3 { font-size: 1.2em; }
   h4 { font-size: 1.05em; }
-  h5, h6 { font-size: 1em; color: #57606a; }
+  h5, h6 { font-size: 1em; color: var(--muted); }
   h1:first-child, h2:first-child { margin-top: 0; }
 
   p { margin: .8em 0; }
 
   /* ---------- 链接 ---------- */
-  a { color: #0969da; text-decoration: none; }
+  a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
   /* ---------- 代码 ---------- */
@@ -52,9 +126,10 @@
     font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
     font-size: .9em;
   }
-  code { background: #f6f8fa; padding: .2em .4em; border-radius: 4px; }
+  code { background: var(--code-bg); color: var(--code-fg); padding: .2em .4em; border-radius: 4px; }
   pre {
-    background: #f6f8fa;
+    background: var(--code-bg);
+    color: var(--code-fg);
     padding: 14px 16px;
     border-radius: 6px;
     overflow: auto;              /* 长行横向滚动，不要撑破版面 */
@@ -63,29 +138,29 @@
 
   /* ---------- 代码高亮 ----------
      这些类名是 CodeHighlighter（C++）和这里 CSS 之间的契约：高亮器把代码切成
-     <span class="hljs-xxx">，配色全在这里。想换主题只改这一段就行 ——
+     <span class="hljs-xxx">，配色全在这里（用的是主题变量，所以亮暗一起切）。
      预览和导出的 HTML/PDF 用的是同一份样式（导出时会从本文件里抽这段 CSS）。 */
-  .hljs-comment   { color: #6a737d; font-style: italic; }
-  .hljs-keyword   { color: #d73a49; }
-  .hljs-type      { color: #6f42c1; }
-  .hljs-literal   { color: #005cc5; }
-  .hljs-built_in  { color: #005cc5; }
-  .hljs-string    { color: #032f62; }
-  .hljs-number    { color: #005cc5; }
-  .hljs-function  { color: #6f42c1; }
-  .hljs-attr      { color: #005cc5; }
-  .hljs-tag       { color: #22863a; }
-  .hljs-operator  { color: #d73a49; }
-  .hljs-meta      { color: #6a737d; font-style: italic; }
-  .hljs-diff-add  { color: #22863a; background: #f0fff4; }
-  .hljs-diff-del  { color: #b31d28; background: #ffeef0; }
+  .hljs-comment   { color: var(--tok-comment); font-style: italic; }
+  .hljs-keyword   { color: var(--tok-keyword); }
+  .hljs-type      { color: var(--tok-type); }
+  .hljs-literal   { color: var(--tok-literal); }
+  .hljs-built_in  { color: var(--tok-builtin); }
+  .hljs-string    { color: var(--tok-string); }
+  .hljs-number    { color: var(--tok-number); }
+  .hljs-function  { color: var(--tok-function); }
+  .hljs-attr      { color: var(--tok-attr); }
+  .hljs-tag       { color: var(--tok-tag); }
+  .hljs-operator  { color: var(--tok-operator); }
+  .hljs-meta      { color: var(--tok-meta); font-style: italic; }
+  .hljs-diff-add  { color: var(--tok-add-fg); background: var(--tok-add-bg); }
+  .hljs-diff-del  { color: var(--tok-del-fg); background: var(--tok-del-bg); }
 
   /* ---------- 引用 ---------- */
   blockquote {
     margin: .8em 0;
     padding: 0 1em;
-    color: #57606a;
-    border-left: .25em solid #d0d7de;
+    color: var(--muted);
+    border-left: .25em solid var(--quote-bar);
   }
   blockquote > :first-child { margin-top: 0; }
   blockquote > :last-child { margin-bottom: 0; }
@@ -99,13 +174,13 @@
 
   /* ---------- 表格（GFM）---------- */
   table { border-collapse: collapse; margin: 1em 0; display: block; overflow: auto; }
-  th, td { border: 1px solid #d0d7de; padding: 6px 13px; }
-  th { background: #f6f8fa; font-weight: 600; }
-  tbody tr:nth-child(2n) { background: #f6f8fa; }
+  th, td { border: 1px solid var(--border-strong); padding: 6px 13px; }
+  th { background: var(--stripe); font-weight: 600; }
+  tbody tr:nth-child(2n) { background: var(--stripe); }
 
   /* ---------- 其它 ---------- */
   img { max-width: 100%; }
-  hr { border: 0; border-top: 1px solid #d0d7de; margin: 24px 0; }
+  hr { border: 0; border-top: 1px solid var(--border-strong); margin: 24px 0; }
 </style>
 
 <!-- Qt 自带的 WebChannel 客户端脚本。
@@ -118,6 +193,25 @@
 
 <script>
 'use strict';
+
+/* =========================================================================
+   主题（5.7）
+   -------------------------------------------------------------------------
+   C++ 侧（ThemeManager → PreviewRenderer::applyTheme）会调用 applyTheme('dark')。
+   它只做一件事：改 <html> 上的 data-theme 属性 —— 所有颜色都是 CSS 变量，
+   浏览器立刻按新变量重绘。**不重新加载页面**，所以：
+     * 不会闪一下白（重载才会）
+     * 不会让 WebChannel 重连
+     * 滚动位置、展开状态都不会丢
+   ========================================================================= */
+function applyTheme(name) {
+    const theme = (name === 'dark') ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+    console.log('主题已切换: ' + theme);
+}
+
+// 页面刚加载完时先用亮色兜底；C++ 侧加载完成后会立刻用真实主题覆盖一次
+document.documentElement.setAttribute('data-theme', 'light');
 
 /* =========================================================================
    与 C++ 的桥（QWebChannel）

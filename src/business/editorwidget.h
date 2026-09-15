@@ -5,6 +5,8 @@
 #include <QPlainTextEdit>
 #include <QString>
 
+#include "themepalette.h"  // 值成员，需要完整定义（主题配色）
+
 class QKeyEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -41,6 +43,10 @@ class EditorWidget : public QPlainTextEdit
     Q_OBJECT
 
 public:
+    // 本类在**全局命名空间**（理由见上面那段），配色表在 markdown_editor::core::document 里，
+    // 用别名接进来（和 MarkdownHighlighter 里的写法一致）。
+    using ThemePalette = markdown_editor::core::document::ThemePalette;
+
     explicit EditorWidget(QWidget *parent = nullptr);
 
     // 已绑定的高亮器（本控件创建并持有，界面不用管它的生命周期）
@@ -52,6 +58,15 @@ public:
 
     int indentWidth() const;
     void setIndentWidth(int spaces);
+
+    // ============================ 主题（5.7）============================
+
+    // 换一套配色：行号栏的颜色立刻更新，语法高亮也重新上一遍色。
+    // 编辑器控件的**背景/文字色**由 QSS 管（见 resources/styles/*.qss），
+    // 这里只管"画出来的东西"（行号、当前行高亮）和"高亮格式的颜色"。
+    // 与当前配色相同时直接返回 —— 主题被重复应用不该造成多余重绘（闪烁就是这么来的）。
+    void setThemePalette(const ThemePalette &palette);
+    ThemePalette themePalette() const;
 
     // ============================ 跳转 ============================
 
@@ -124,7 +139,10 @@ private:
 
     int m_indentWidth = 4;
 
-    // 颜色从调色板取，亮色/暗色主题都不用改代码
+    // 主题配色（默认亮色；切换由 ThemeManager 通过 setThemePalette() 推进来）
+    ThemePalette m_themePalette;
+
+    // 行号栏与当前行用的颜色（由 m_themePalette 派生，改主题时一起更新）
     QColor m_gutterBackground;
     QColor m_lineNumberColor;
     QColor m_currentLineNumberColor;

@@ -7,8 +7,9 @@ A Qt 6 / C++17 Markdown editor with live bidirectional preview and local version
 > 这是一个边写边学的项目：按分层架构（基础设施 / 核心 / 业务 / 界面）组织，注释写得比较细，
 > 每个模块都配了契约测试。适合当作 Qt Widgets + QtWebEngine + CMake 的阅读材料。
 >
-> 当前进度：核心部分（文件管理、版本历史、内容缓存、代码高亮）与界面部分（编辑器、多标签页、
-> 分屏预览、文件树侧边栏、最近打开、全文搜索、HTML/PDF 导出）都已经能用，接下来做工作区。
+> 当前进度：核心部分（文件管理、版本历史、内容缓存、代码高亮、亮暗主题）与界面部分（编辑器、
+> 多标签页、分屏预览、文件树侧边栏、最近打开、全文搜索、HTML/PDF 导出）都已经能用，
+> 接下来做工作区。
 
 ---
 
@@ -24,6 +25,7 @@ A Qt 6 / C++17 Markdown editor with live bidirectional preview and local version
 | **分屏与显示模式** | 左右分屏（拖分隔条调比例）/ 仅编辑 / 仅预览，快捷键 Ctrl+1 / 2 / 3；从分屏切走再切回来会**记住比例** |
 | **语法高亮** | 编辑器里：标题、粗体/斜体、行内代码、围栏代码块、列表、引用 |
 | **代码高亮** | 代码块按语言**真着色**（30 多种：C/C++/C#/Java/JS/TS/Python/Rust/Go/Kotlin/Swift/PHP/Ruby/Shell/PowerShell/SQL/HTML/CSS/JSON/YAML/TOML/CMake/Dockerfile/Diff…）。语言由你选：写 ` ```python ` 或在**工具 → 插入代码块**里挑。**预览、导出的 HTML、导出的 PDF 是同一份高亮结果**（高亮在 C++ 里做，不依赖页面脚本）；语言名不认识时原样显示、不报错；配色集中在预览模板的 CSS 里，想换主题只改一处 |
+| **亮暗主题** | **视图 → 主题 → 亮色 / 暗色**一键切换，菜单栏、工具栏、标签页、文件树、搜索面板、编辑器、预览区**一次全换**。两套 QSS 在 `resources/styles/`，编辑器语法配色是两套 `ThemePalette`（有对比度测试盯着），预览区的颜色全是 CSS 变量 —— 切换只改一个属性，**不重载页面**，所以不闪白、不丢滚动位置；选择会记住，重启后还是它 |
 | **编辑体验** | 括号/引号自动闭合（含包裹选中内容、退格整对删除）、自动缩进、列表与引用回车续行（有序列表序号自动 +1、任务列表续写、空标记回车退出列表）；Tab 插入空格而不是制表符 |
 | **行号栏与定位** | 左侧行号栏（当前行加粗）、当前行高亮；状态栏实时显示「行 x，列 y」 |
 | **双向同步** | 编辑器滚动 → 预览跟着滚；点击预览 → 编辑器跳到对应源码行（走 QWebChannel） |
@@ -38,15 +40,15 @@ A Qt 6 / C++17 Markdown editor with live bidirectional preview and local version
 | **本地历史** | 每次保存自动在独立仓库里打一个轻量快照（备注带时间戳），可查历史列表、看与上一版的差异、回滚到任意版本（**回滚只改内存**，确认后按 Ctrl+S 才写盘） |
 | **内容缓存** | 基于 QCache 的 LRU 缓存，缓存最近打开的文件内容；带「修改时间 + 大小」过期校验；状态栏显示命中率，可手动清空 |
 | **基础设施** | 统一日志（控制台 + 文件，带文件名与行号）、文件工具、键值配置（QSettings + ini）、SQLite 元数据模块（已有测试，尚未接入界面） |
-| **测试** | 18 个测试程序、1086 项检查，`ctest` 一键跑完 |
+| **测试** | 19 个测试程序、1168 项检查，`ctest` 一键跑完 |
 
 ### 计划中
 
 - 工作区（一次打开一个文件夹并在其中管理）
 - 编辑器里也按代码块的语言着色（现在代码块在编辑区是统一的底色）
+- 跟随系统主题自动切换（现在要手动选）
 - 搜索结果里高亮命中词（现在是把命中处所在的那一段截出来显示）
 - 导出时的 HTML 净化（CommonMark 规定 Markdown 里的原始 HTML 原样透传，导出文件同样如此）
-- 亮暗主题切换
 - 笔记元数据接入界面（标签、搜索）
 - 大纲（TOC）导航
 - 图片粘贴与相对路径管理
@@ -87,14 +89,14 @@ ctest --test-dir build -C Debug --output-on-failure
 
 ```
 src/infrastructure/   日志、文件工具、SQLite 元数据
-src/core/document/    文档模型、Markdown 解析、编辑器语法高亮、代码高亮（多语言分词器）、渲染管线、同步桥
+src/core/document/    文档模型、Markdown 解析、编辑器语法高亮、代码高亮（多语言分词器）、主题配色表、渲染管线、同步桥
 src/core/storage/     文件管理（编码 / 只读 / 修改标志）、版本历史（git 快照）、内容缓存
-src/business/         业务层：编辑器控件（编辑增强 + 行号栏）、多标签页管理、分屏工作台、文件树侧边栏、最近文件、全文搜索（FTS5 索引 + 搜索面板）、导出器（HTML / PDF）
+src/business/         业务层：编辑器控件（编辑增强 + 行号栏）、多标签页管理、分屏工作台、文件树侧边栏、最近文件、全文搜索（FTS5 索引 + 搜索面板）、导出器（HTML / PDF）、主题管理器
 src/ui/               主窗口、导出对话框与界面接线（mainwindow.ui + 附带代码）
 src/app/              程序入口
 tests/                各模块的契约测试（ctest）
 third_party/md4c/     Markdown 解析库（MIT）
-resources/            预览页 HTML 模板与 qrc
+resources/            预览页 HTML 模板（颜色走 CSS 变量）+ 主题 QSS（styles/）+ qrc
 ```
 
 分层原则：依赖方向单向向下，跨层只通过明确接口；每个模块用 CMake 的 `PUBLIC` / `PRIVATE`
@@ -104,7 +106,7 @@ resources/            预览页 HTML 模板与 qrc
 
 - 日志：`%APPDATA%/Dev/MarkdownEditor/logs/`
 - 版本历史（每个文档一个 git 仓库）：`%APPDATA%/Dev/MarkdownEditor/history/<文档名>-<路径哈希>/`
-- 配置（窗口/最近文件等，QSettings 写的 ini，可以用记事本直接看和改）：`%APPDATA%/Dev/MarkdownEditor/config.ini`
+- 配置（窗口/最近文件/主题等，QSettings 写的 ini，可以用记事本直接看和改）：`%APPDATA%/Dev/MarkdownEditor/config.ini`
 - 全文搜索索引（SQLite + FTS5，删掉它只会让下次搜索要重新建索引）：`%APPDATA%/Dev/MarkdownEditor/search-index.sqlite`
 - 笔记元数据（SQLite，尚未接入界面）：`%APPDATA%/Dev/MarkdownEditor/`
 

@@ -14,5 +14,8 @@
 <RCC version="1.0">
     <qresource prefix="/">
         <file>html/preview_template.html</file>
+        <!-- 主题样式表（5.7）：两份文件的选择器清单必须一致，只换值 -->
+        <file>styles/light.qss</file>
+        <file>styles/dark.qss</file>
     </qresource>
 </RCC>

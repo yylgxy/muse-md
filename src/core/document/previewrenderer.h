@@ -110,6 +110,13 @@ public:
     bool isPageReady() const;        // 页面（以及里面的 JS）是否已经可以接收内容
     bool hasPendingUpdate() const;   // 是否还有"等防抖到期"的内容
 
+    // ---- 主题（5.7）----
+    // 切换预览的主题。**不重载页面**：页面里的颜色全是 CSS 变量，这里只调用页面里的
+    // applyTheme() 改一个 data-theme 属性，所以是瞬时的、不闪白、不丢滚动位置。
+    // themeId 只认 "dark"/"light"（别的值一律当 light）—— 这个字符串最终会进 JS，先收窄。
+    void applyTheme(const QString &themeId);
+    QString themeId() const;
+
     // 已经自动恢复过几次渲染进程（页面成功加载后清零）。给测试和日志看。
     int rendererRestartCount() const;
 
@@ -162,6 +169,9 @@ private:
     void pushNow();
     void onLoadFinished(bool ok);
 
+    // 把当前主题推进页面（页面没就绪时什么也不做：加载完成时会再调一次）
+    void applyThemeToPage();
+
     QPointer<QWebEngineView> m_view;  // QPointer：view 被销毁（比如主窗口析构）后自动变空
     QPointer<QWebEnginePage> m_page;  // 页面挂在 view 名下，这里只是"借来看"，不拥有
 
@@ -175,6 +185,7 @@ private:
     // 否则重载后文档里的相对路径图片会找不到）。
     QString m_currentBaseDir;
     int m_rendererRestarts = 0;  // 已经自动恢复过几次（成功加载后清零）
+    QString m_themeId = QStringLiteral("light");  // 当前预览主题（见 applyTheme）
 };
 
 }  // namespace markdown_editor::core::document
