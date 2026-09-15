@@ -15,6 +15,8 @@ add_library(business STATIC
     fulltextsearch.cpp
     searchpanel.h
     searchpanel.cpp
+    exporter.h
+    exporter.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。
@@ -36,6 +38,10 @@ target_include_directories(business PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 #                     PRIVATE 依赖会被 CMake 以 $<LINK_ONLY:Qt6::Sql> 自动传给最终目标，
 #                     所以链接 business 的人不用自己再写一遍 —— 但测试要直接用
 #                     QSqlDatabase 的话，自己显式链接更清楚。
+# Qt6::WebEngineWidgets 是 PRIVATE：导出 PDF（5.6）要用 QWebEnginePage::printToPdf，
+#                     EditorWorkbench 也用 QWebEngineView。这两个头文件里都只是前置声明的
+#                     指针，不需要出现在接口上（core_document 本来就 PUBLIC 带了它，
+#                     这里显式写出来是为了让"谁在用 WebEngine"一眼可见）。
 target_link_libraries(business
     PUBLIC
         core_document
@@ -44,6 +50,7 @@ target_link_libraries(business
     PRIVATE
         infrastructure
         Qt6::Sql
+        Qt6::WebEngineWidgets
 )
 
 # 兜底依赖：改任何头文件都重编本目录的目标。

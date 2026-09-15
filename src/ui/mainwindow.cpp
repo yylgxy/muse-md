@@ -4,6 +4,7 @@
 
 #include "editorwidget.h"       // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
 #include "editorworkbench.h"    // .ui 中央区那台"工作台"（分屏 + 预览 + 双向同步）
+#include "exportdialog.h"       // 5.6：导出对话框（只收集设置，干活的是 Exporter）
 #include "filetreeview.h"       // 5.4.1：左边的文件树侧边栏（.ui 里已经有一块 FileTreeView）
 #include "logger.h"
 #include "previewrenderer.h"    // updateContent() 要用完整类型（渲染管线归工作台持有，这里只是借来用）
@@ -14,6 +15,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -27,12 +29,14 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QStatusBar>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QToolBar>
+#include <QUrl>
 #include <QVBoxLayout>
 
 using markdown_editor::core::storage::CacheManager;
@@ -61,6 +65,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     m_recent.load();
     connect(&m_recent, &RecentFiles::changed, this, &MainWindow::rebuildRecentMenu);
     rebuildRecentMenu();
+
+    // 导出（5.6）：PDF 是异步的（printToPdf 走 Chromium 的打印管线），结果从这里回来。
+    // 导出器是窗口的成员，所以"导出还没结束窗口就关了"这种情况不会发生。
+    connect(&m_exporter, &Exporter::pdfExported, this, [this](const QString &path, bool ok, const QString &error) {
+        if (!ok) {
+            QMessageBox::warning(this,
+                                 QStringLiteral("导出失败"),
+                                 error.isEmpty() ? QStringLiteral("没能导出 PDF") : error);
+            statusBar()->showMessage(QStringLiteral("导出 PDF 失败"), 8000);
+            return;
+        }
+        statusBar()->showMessage(QStringLiteral("已导出：%1").arg(QDir::toNativeSeparators(path)), 8000);
+        offerToOpenExportedFile(path, true);
+    });
 
     // 先开一个空标签，保证界面上永远有一个可编辑的地方（后面所有代码就能少写一堆判空）
     createSession();
@@ -199,6 +217,17 @@ void MainWindow::initMenuBar()
     m_saveAsAction = fileMenu->addAction(QStringLiteral("另存为(&A)…"));
     m_saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(m_saveAsAction, &QAction::triggered, this, &MainWindow::onSaveFileAs);
+
+    // ---- 导出（5.6）----
+    // 做成子菜单：以后要加"导出为纯文本/Markdown"时不用再动文件菜单的结构。
+    // 导出的是**编辑器里现在的内容**（不必先存盘），这一点见 exportCurrentDocument()。
+    QMenu *exportMenu = fileMenu->addMenu(QStringLiteral("导出(&E)"));
+
+    m_exportHtmlAction = exportMenu->addAction(QStringLiteral("导出为 HTML(&H)…"));
+    connect(m_exportHtmlAction, &QAction::triggered, this, &MainWindow::onExportHtml);
+
+    m_exportPdfAction = exportMenu->addAction(QStringLiteral("导出为 PDF(&P)…"));
+    connect(m_exportPdfAction, &QAction::triggered, this, &MainWindow::onExportPdf);
 
     // ---- 版本历史（4.2.2 的轻量快照）----
     // 快照是保存时自动打的，这里只负责"看"：查历史列表、和上一版比差异
@@ -1083,6 +1112,108 @@ void MainWindow::syncSearchDirectoryToSidebar()
         return;  // 侧边栏还没定根目录：保持面板上的原样，别把它清空
     }
     ui->searchPanel->setDirectory(root);
+}
+
+// ============================ 导出（5.6）============================
+//
+// 分工：ExportDialog 只负责"问用户要什么"（格式、路径、几项参数），
+// Exporter 只负责"把 Markdown 变成 HTML/PDF 文件"（不弹窗、能单独测），
+// 主窗口在这里把两件事接起来 + 把结果说给用户听。
+
+void MainWindow::onExportHtml()
+{
+    exportCurrentDocument(false);
+}
+
+void MainWindow::onExportPdf()
+{
+    exportCurrentDocument(true);
+}
+
+void MainWindow::exportCurrentDocument(bool asPdf)
+{
+    FileManager *files = currentFiles();
+    EditorWidget *editor = currentEditor();
+    if (files == nullptr || editor == nullptr) {
+        return;
+    }
+
+    // 导出的是"编辑器里现在的内容"，不要求先存盘 —— 但内容要先同步进管理器，
+    // 否则会出现"我刚写的这一段没进导出文件"这种最让人意外的结果。
+    files->setText(editor->toPlainText());
+
+    if (asPdf && m_exporter.isPdfRunning()) {
+        QMessageBox::information(this,
+                                 QStringLiteral("还在导出"),
+                                 QStringLiteral("已经有一个 PDF 正在生成。等它结束再来一次。"));
+        return;
+    }
+
+    const ExportDialog::Format format = asPdf ? ExportDialog::Format::Pdf : ExportDialog::Format::Html;
+    QString suggested = ExportDialog::suggestedPathFor(files->filePath(), format);
+    if (!files->hasFilePath()) {
+        // 还没存过盘的新文档：默认放到用户主目录（别往程序目录里写）
+        suggested = QDir(QDir::homePath()).filePath(suggested);
+    }
+
+    // 对话框自己会把标题从"建议路径"推出来（a.md → a.html → 标题 a），
+    // 所以这里不用另外传标题：用户在对话框里改目标文件名也不会改掉文档标题。
+    ExportDialog dialog(format, suggested, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;  // 用户取消了
+    }
+
+    const ExportDialog::Request request = dialog.request();
+    const QString baseDir = files->hasFilePath() ? QFileInfo(files->filePath()).absolutePath() : QString();
+
+    if (request.format == ExportDialog::Format::Html) {
+        Exporter::HtmlResult result;
+        QString error;
+        if (!m_exporter.exportHtml(files->text(), baseDir, request.targetPath, request.html, &result, &error)) {
+            QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+            return;
+        }
+
+        QString detail = QStringLiteral("%1 KB").arg(double(result.bytes) / 1024.0, 0, 'f', 1);
+        if (result.imagesInlined > 0) {
+            detail += QStringLiteral("，内联了 %1 张图片").arg(result.imagesInlined);
+        }
+        if (result.imagesSkipped > 0) {
+            // 说清楚"哪几张没打包进去"，否则用户换了电脑才发现图片丢了
+            detail += QStringLiteral("，%1 张图片没能内联（太大或找不到，仍是相对路径）").arg(result.imagesSkipped);
+        }
+        statusBar()->showMessage(QStringLiteral("已导出 HTML：%1（%2）").arg(QDir::toNativeSeparators(request.targetPath), detail), 8000);
+        offerToOpenExportedFile(request.targetPath, false);
+        return;
+    }
+
+    // PDF：异步。先给一句"正在生成"，结果由 pdfExported 信号带回来（见构造函数里的连接）。
+    statusBar()->showMessage(QStringLiteral("正在生成 PDF：%1 …").arg(QDir::toNativeSeparators(request.targetPath)));
+    m_exporter.exportPdf(files->text(), baseDir, request.targetPath, request.pdf, request.title);
+}
+
+// 导出完成后问一句"要不要现在打开看看"。
+// 这不是花架子：验收标准就是"导出的 HTML 浏览器打开正常、PDF 格式正确"，
+// 一步能打开就省得用户自己去文件夹里翻。
+void MainWindow::offerToOpenExportedFile(const QString &path, bool asPdf)
+{
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("导出完成"));
+    box.setIcon(QMessageBox::Information);
+    box.setText(QStringLiteral("已导出：\n%1").arg(QDir::toNativeSeparators(path)));
+    box.setInformativeText(asPdf ? QStringLiteral("要现在用系统默认的 PDF 阅读器打开看看吗？")
+                                 : QStringLiteral("要现在用系统默认的浏览器打开看看吗？"));
+
+    QPushButton *openFileButton = box.addButton(QStringLiteral("打开文件"), QMessageBox::AcceptRole);
+    QPushButton *openDirButton = box.addButton(QStringLiteral("打开所在文件夹"), QMessageBox::ActionRole);
+    box.addButton(QStringLiteral("完成"), QMessageBox::RejectRole);
+    box.exec();
+
+    if (box.clickedButton() == openFileButton) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    } else if (box.clickedButton() == openDirButton) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    }
 }
 
 // ============================ 缓存（4.2.3）============================

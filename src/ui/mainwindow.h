@@ -6,6 +6,7 @@
 #include <QString>
 
 #include "editorworkbench.h"  // 显示模式的枚举类型出现在槽签名里，需要完整定义
+#include "exporter.h"         // 5.6：导出器是整个窗口的一个成员（按值持有）
 #include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "recentfiles.h"      // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
 
@@ -79,6 +80,10 @@ private slots:
 
     // 清空当前文档的内存缓存（4.2.3）
     void onClearCache();
+
+    // 导出当前文档（5.6）：弹出导出对话框，然后按选择的格式导出
+    void onExportHtml();
+    void onExportPdf();
 
     // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
     void onSearchResultActivated(const QString &filePath, int line);
@@ -157,6 +162,12 @@ private:
     // 就是搜索会去索引的目录，不需要在两处各选一遍。
     void syncSearchDirectoryToSidebar();
 
+    // ============================ 导出（5.6）============================
+    // 弹导出对话框 → 按用户的选择导出。dialogFormat 是预设的格式（菜单点哪一项就是哪种）。
+    void exportCurrentDocument(bool asPdf);
+    // 导出成功后问一句"要不要现在打开看看" —— 验收"HTML 浏览器打开正常"最省事的路径
+    void offerToOpenExportedFile(const QString &path, bool asPdf);
+
     void updateWindowTitle();
     // 状态栏右侧那行缓存状态（当前标签的缓存：条数 / 命中次数 / 命中率）
     void updateCacheStatus();
@@ -177,6 +188,8 @@ private:
     QAction *m_openFolderAction = nullptr;  // 5.4.1：选一个目录做文件树的根
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
+    QAction *m_exportHtmlAction = nullptr;  // 5.6：导出为 HTML
+    QAction *m_exportPdfAction = nullptr;   // 5.6：导出为 PDF
     QAction *m_closeTabAction = nullptr;
     QAction *m_nextTabAction = nullptr;
     QAction *m_previousTabAction = nullptr;
@@ -196,6 +209,10 @@ private:
     // 最近文件列表（5.4.2）。按值持有：它就是主窗口状态的一部分，
     // 由 MainWindow 的构造函数统一 load()、由 changed() 信号驱动菜单重建。
     RecentFiles m_recent;
+
+    // 导出器（5.6）。按值持有：一次导出一个任务，PDF 是异步的（结果靠 pdfExported 信号回来），
+    // 成员活到窗口析构，不会出现"导出还没结束，对象先没了"的情况。
+    Exporter m_exporter;
 
     QLabel *m_cacheLabel = nullptr;   // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
     QLabel *m_cursorLabel = nullptr;  // 状态栏上的"行 x，列 y"（来自 EditorWidget::cursorMoved）

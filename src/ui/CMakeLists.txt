@@ -4,6 +4,8 @@ add_library(ui STATIC
     mainwindow.ui        # ← .ui 也列进来：AUTOUIC 会用 uic 把它编成 ui_mainwindow.h
     mainwindow.h
     mainwindow.cpp
+    exportdialog.h       # 5.6：导出对话框（只收集设置，干活的是 business 里的 Exporter）
+    exportdialog.cpp
 )
 
 # 让链接 ui 的目标（src/app）能直接 #include "mainwindow.h"
