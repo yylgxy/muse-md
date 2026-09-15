@@ -273,6 +273,10 @@ void MainWindow::initMenuBar()
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QWidget::close);
 
+    // 「编辑」菜单紧跟在「文件」后面（菜单顺序：文件 → 编辑 → 标签 → 视图 → 工具 → 帮助）。
+    // 注意它是**单独一个函数**：撤销/重做…这些动作作用于"当前标签"，逻辑自成一块。
+    initEditActions();
+
     // ---- 标签菜单（5.2）----
     QMenu *tabMenu = menuBar()->addMenu(QStringLiteral("标签(&B)"));
 

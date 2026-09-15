@@ -326,11 +326,30 @@ target_link_libraries(test_sessionstate
 )
 add_test(NAME sessionstate COMMAND test_sessionstate)
 
+# ---------------- 核心主流程全链路测试（7.1）----------------
+# 把"开机到关机"会经过的所有模块**串起来**跑一遍：会话恢复 → 新建/输入 → 渲染与行号映射 →
+# 保存 → 多标签 → 全文搜索与跳转 → 导出 HTML → 主题切换 → 关闭再恢复。
+# 单元测试全绿也可能接线接错，这个测试就是抓那种问题的。
+# 需要 QApplication（有 EditorWidget/TabManager/EditorWorkbench）。预览侧传普通 QWidget，
+# 因为 QWebEngineView 在受控环境里起不来 —— 需要人工确认的项会在输出里标成 MANUAL。
+add_executable(test_endtoend
+    test_endtoend.cpp
+)
+target_link_libraries(test_endtoend
+    business
+    core_storage
+    infrastructure
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME endtoend COMMAND test_endtoend)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout sessionstate PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout sessionstate endtoend PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

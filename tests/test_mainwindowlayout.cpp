@@ -469,6 +469,75 @@ int main(int argc, char *argv[])
               missingResources.join(QStringLiteral(", ")));
     }
 
+    // ============================ I. 「写了但没接线」检查 ============================
+    //
+    // 7.1 全链路测试时抓到的真 bug：initEditActions() 写了、却**从来没被调用** ——
+    // 于是运行起来「编辑」菜单根本不会出现，而结构测试却放过了它（它只查"文件里有没有
+    // 这些字符串"，不查"有没有被调用"）。
+    //
+    // 规则：mainwindow.cpp 里每个 `MainWindow::xxx` 的定义，它的名字在文件里必须出现
+    // **不止一次**（定义之外至少还有一次调用或 connect）。槽函数是通过
+    // &MainWindow::onXxx 连的，也算出现 ✓。只出现一次 = 死代码或者忘了接。
+    //
+    // 例外：Qt 通过虚函数表调用的那几个（closeEvent / dragEnterEvent / dropEvent …）
+    // 本来就不会被显式调用，所以**在头文件里带 override 的一律跳过** ——
+    // 这条例外是写这道检查时被自己的假阳性打出来的（它当时报了 closeEvent）。
+    {
+        std::printf("---- I. 写了但没接线 ----\n");
+
+        const QString header = readFile(root + QStringLiteral("/src/ui/mainwindow.h"));
+
+        static const QRegularExpression definitionRe(QStringLiteral("MainWindow::([A-Za-z_][A-Za-z0-9_]*)\\s*\\("));
+        QRegularExpressionMatchIterator it = definitionRe.globalMatch(cpp);
+
+        QStringList defined;
+        while (it.hasNext()) {
+            const QString name = it.next().captured(1);
+            if (!defined.contains(name)) {
+                defined << name;
+            }
+        }
+        check(defined.size() > 30, QStringLiteral("接线: 从 mainwindow.cpp 里解析出了足够多的成员函数"),
+              QStringLiteral("%1 个").arg(defined.size()));
+
+        int skippedOverrides = 0;
+        QStringList neverCalled;
+        for (const QString &name : defined) {
+            // 头文件里声明成 override 的（Qt 自己会调）：跳过
+            const QRegularExpression overrideForThisName(
+                QStringLiteral("\\b%1\\s*\\([^;]*\\)\\s*override").arg(QRegularExpression::escape(name)));
+            if (overrideForThisName.match(header).hasMatch()) {
+                ++skippedOverrides;
+                continue;
+            }
+
+            int occurrences = 0;
+            int from = 0;
+            while ((from = cpp.indexOf(name, from)) >= 0) {
+                ++occurrences;
+                from += name.size();
+            }
+            if (occurrences < 2) {
+                neverCalled << name;
+            }
+        }
+        check(!neverCalled.isEmpty() ? false : true,
+              QStringLiteral("接线: 每个成员函数都至少被调用/连接过一次（没有写了却不接线的）"),
+              neverCalled.join(QStringLiteral(", ")));
+        check(skippedOverrides >= 3,
+              QStringLiteral("接线: 跳过的事件处理函数（override）至少有 3 个：关窗 + 拖拽那两个"),
+              QStringLiteral("%1 个").arg(skippedOverrides));
+
+        // 构造函数里那几件事必须真的被调过（这是上面那条规则最关心的几处）
+        const QStringList mustBeCalled = {QStringLiteral("initUi();"),          QStringLiteral("initMenuBar();"),
+                                          QStringLiteral("initEditActions();"),  QStringLiteral("initToolBar();"),
+                                          QStringLiteral("initStatusBar();"),    QStringLiteral("restoreSession();"),
+                                          QStringLiteral("createSession();")};
+        const QStringList missingCalls = missingPieces(cpp, mustBeCalled);
+        check(missingCalls.isEmpty(), QStringLiteral("接线: 初始化/会话恢复那几件事都在构造函数里调用了"),
+              missingCalls.join(QStringLiteral(", ")));
+    }
+
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
