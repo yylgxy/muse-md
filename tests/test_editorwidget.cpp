@@ -710,6 +710,38 @@ int main(int argc, char *argv[])
         check(manual.isHighlightingEnabled(), QStringLiteral("手动: 再打开也能恢复"));
     }
 
+    // ============================ N. 行号栏的悬停提示（7.3）============================
+    {
+        EditorWidget editor;
+        editor.resize(400, 200);
+
+        check(editor.lineNumberAtY(0) == 1, QStringLiteral("悬停: 视口最顶上就是第 1 行"),
+              QStringLiteral("第 %1 行").arg(editor.lineNumberAtY(0)));
+
+        // 空文档 / 多行文档都不能给出越界的行号
+        editor.setPlainText(QStringLiteral("一\n二\n三\n"));
+        check(editor.lineNumberAtY(-100) == 1, QStringLiteral("悬停: 负坐标夹到第 1 行（不崩）"));
+        const int lines = editor.document()->blockCount();
+        check(editor.lineNumberAtY(100000) == lines,
+              QStringLiteral("悬停: 远低于最后一行时给最后一行（不越界）"),
+              QStringLiteral("返回 %1 / 共 %2 行").arg(editor.lineNumberAtY(100000)).arg(lines));
+
+        // 行号随 y 单调不减（这是"提示的行号和画出来的行号对得上"的基本条件）
+        int previous = 0;
+        bool monotonic = true;
+        for (int y = 0; y < 200; y += 4) {
+            const int line = editor.lineNumberAtY(y);
+            if (line < previous) {
+                monotonic = false;
+                break;
+            }
+            previous = line;
+        }
+        check(monotonic, QStringLiteral("悬停: 行号随 y 单调不减"));
+        check(editor.lineNumberAtY(0) == 1 && editor.lineNumberAtY(100000) == lines,
+              QStringLiteral("悬停: 两头都对得上（上边界 1、下边界最后一行）"));
+    }
+
     // ============================ L. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;

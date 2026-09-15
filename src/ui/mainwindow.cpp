@@ -240,20 +240,30 @@ void MainWindow::initUi()
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
 // 快捷键（QKeySequence::Open）、动作对象、triggered 连接都是 C++ 的事，
 // 所以这一整块和"中央布局用不用 .ui"无关，永远是代码。
+//
+// 悬停提示（7.3）在这两处分别是：
+//   * setStatusTip：鼠标停在**菜单项**上时，状态栏会显示这句话（QMainWindow 自带的行为）；
+//   * setToolTip：鼠标停在**工具栏按钮**上时弹出的小黄条。
+// 两者不是重复劳动：菜单项给出的是"这个命令做什么"，工具栏按钮还要顺带提示快捷键。
 void MainWindow::initMenuBar()
 {
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
 
     m_newAction = fileMenu->addAction(QStringLiteral("新建标签(&N)"));
     m_newAction->setShortcut(QKeySequence::New);
+    m_newAction->setStatusTip(QStringLiteral("新建一个标签（Ctrl+N）"));
+    m_newAction->setToolTip(QStringLiteral("新建标签（Ctrl+N）"));
     connect(m_newAction, &QAction::triggered, this, &MainWindow::onNewFile);
 
     m_openAction = fileMenu->addAction(QStringLiteral("打开(&O)…"));
     m_openAction->setShortcut(QKeySequence::Open);
+    m_openAction->setStatusTip(QStringLiteral("打开一个 Markdown 文件（Ctrl+O）"));
+    m_openAction->setToolTip(QStringLiteral("打开文件（Ctrl+O）"));
     connect(m_openAction, &QAction::triggered, this, &MainWindow::onOpenFile);
 
     // ---- 文件树侧边栏（5.4.1）：选一个目录作为侧边栏的根 ----
     m_openFolderAction = fileMenu->addAction(QStringLiteral("打开文件夹(&K)…"));
+    m_openFolderAction->setStatusTip(QStringLiteral("把左侧文件树切到某个文件夹"));
     connect(m_openFolderAction, &QAction::triggered, this, &MainWindow::onOpenFolder);
 
     // ---- 最近打开（5.4.2）----
@@ -262,10 +272,13 @@ void MainWindow::initMenuBar()
 
     m_saveAction = fileMenu->addAction(QStringLiteral("保存(&S)"));
     m_saveAction->setShortcut(QKeySequence::Save);
+    m_saveAction->setStatusTip(QStringLiteral("保存当前标签（Ctrl+S）"));
+    m_saveAction->setToolTip(QStringLiteral("保存（Ctrl+S）"));
     connect(m_saveAction, &QAction::triggered, this, &MainWindow::onSaveFile);
 
     m_saveAsAction = fileMenu->addAction(QStringLiteral("另存为(&A)…"));
     m_saveAsAction->setShortcut(QKeySequence::SaveAs);
+    m_saveAsAction->setStatusTip(QStringLiteral("把当前文档存到别的位置（Ctrl+Shift+S）"));
     connect(m_saveAsAction, &QAction::triggered, this, &MainWindow::onSaveFileAs);
 
     // ---- 导出（5.6）----
@@ -349,6 +362,7 @@ void MainWindow::initMenuBar()
     // ---- 文件树侧边栏开关（5.4.1 → 主窗口布局那一节改成停靠面板）----
     viewMenu->addSeparator();
     m_showFileTreeAction = viewMenu->addAction(QStringLiteral("文件树(&F)"));
+    m_showFileTreeAction->setStatusTip(QStringLiteral("显示/隐藏左侧文件树面板"));
     m_showFileTreeAction->setCheckable(true);
     m_showFileTreeAction->setChecked(true);  // .ui 里默认就是可见的，勾选状态要和它一致
     connect(m_showFileTreeAction, &QAction::toggled, this, [this](bool visible) {
@@ -383,6 +397,7 @@ void MainWindow::initMenuBar()
     m_themeGroup->setExclusive(true);
 
     m_themeLightAction = themeMenu->addAction(QStringLiteral("亮色(&L)"));
+    m_themeLightAction->setStatusTip(QStringLiteral("切到亮色主题"));
     m_themeLightAction->setCheckable(true);
     m_themeGroup->addAction(m_themeLightAction);
     connect(m_themeLightAction, &QAction::triggered, this, [this] {
@@ -391,6 +406,7 @@ void MainWindow::initMenuBar()
     });
 
     m_themeDarkAction = themeMenu->addAction(QStringLiteral("暗色(&D)"));
+    m_themeDarkAction->setStatusTip(QStringLiteral("切到暗色主题（Ctrl+Shift+T）"));
     m_themeDarkAction->setCheckable(true);
     m_themeGroup->addAction(m_themeDarkAction);
     connect(m_themeDarkAction, &QAction::triggered, this, [this] {
@@ -413,6 +429,7 @@ void MainWindow::initMenuBar()
     // ---- 帮助菜单 ----
     QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
     m_aboutAction = helpMenu->addAction(QStringLiteral("关于(&A)…"));
+    m_aboutAction->setStatusTip(QStringLiteral("关于这个程序"));
     connect(m_aboutAction, &QAction::triggered, this, &MainWindow::onAbout);
 
     m_aboutQtAction = helpMenu->addAction(QStringLiteral("关于 Qt(&Q)…"));
@@ -447,28 +464,38 @@ void MainWindow::initEditActions()
     };
 
     m_undoAction = addEditorAction(QStringLiteral("撤销(&U)"), QKeySequence::Undo, &QPlainTextEdit::undo);
+    m_undoAction->setStatusTip(QStringLiteral("撤销上一步（Ctrl+Z）"));
+    m_undoAction->setToolTip(QStringLiteral("撤销（Ctrl+Z）"));
     m_redoAction = addEditorAction(QStringLiteral("重做(&R)"), QKeySequence::Redo, &QPlainTextEdit::redo);
     // 重做在 Windows 上是 Ctrl+Y，在 macOS/Linux 上是 Ctrl+Shift+Z。这里两个都收：
     // 用户从别的编辑器过来时手会是习惯的那个。
     m_redoAction->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
+    m_redoAction->setStatusTip(QStringLiteral("重做刚撤销的那一步（Ctrl+Y）"));
+    m_redoAction->setToolTip(QStringLiteral("重做（Ctrl+Y）"));
 
     editMenu->addSeparator();
     m_cutAction = addEditorAction(QStringLiteral("剪切(&T)"), QKeySequence::Cut, &QPlainTextEdit::cut);
+    m_cutAction->setStatusTip(QStringLiteral("剪切选中的内容（Ctrl+X）"));
     m_copyAction = addEditorAction(QStringLiteral("复制(&C)"), QKeySequence::Copy, &QPlainTextEdit::copy);
+    m_copyAction->setStatusTip(QStringLiteral("复制选中的内容（Ctrl+C）"));
     m_pasteAction = addEditorAction(QStringLiteral("粘贴(&P)"), QKeySequence::Paste, &QPlainTextEdit::paste);
+    m_pasteAction->setStatusTip(QStringLiteral("粘贴（Ctrl+V）"));
 
     editMenu->addSeparator();
     m_selectAllAction = addEditorAction(QStringLiteral("全选(&A)"), QKeySequence::SelectAll, &QPlainTextEdit::selectAll);
+    m_selectAllAction->setStatusTip(QStringLiteral("选中当前文档的全部内容（Ctrl+A）"));
 
     // ---- 查找 / 替换 ----
     // 注意 Ctrl+F 在 Qt 里是 QKeySequence::Find；编辑器本身不处理它，所以不会冲突。
     editMenu->addSeparator();
     m_findAction = editMenu->addAction(QStringLiteral("查找(&F)…"));
     m_findAction->setShortcut(QKeySequence::Find);
+    m_findAction->setStatusTip(QStringLiteral("在当前文档里查找（Ctrl+F）"));
     connect(m_findAction, &QAction::triggered, this, &MainWindow::onFind);
 
     m_replaceAction = editMenu->addAction(QStringLiteral("替换(&H)…"));
     m_replaceAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
+    m_replaceAction->setStatusTip(QStringLiteral("在当前文档里查找并替换（Ctrl+H）"));
     connect(m_replaceAction, &QAction::triggered, this, &MainWindow::onReplace);
 }
 
@@ -931,6 +958,12 @@ bool MainWindow::saveSession(FileManager *files, EditorWidget *editor)
         return saveSessionAs(files, editor);  // 新文档还没有路径 → 走另存为
     }
 
+    // 保存之前再查一次外部改动：磁盘上那份被别人改过的话，
+    // 直接写下去就把别人的改动覆盖掉了 —— 那可能是人家几个小时的工作。
+    if (!confirmOverwriteIfChanged(files)) {
+        return false;
+    }
+
     QString error;
     if (!files->saveFile(&error)) {
         // 失败原因由管理器给出（只读 / 没有写权限 / 文件被占用…）。
@@ -1039,6 +1072,10 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
 
     // 状态栏那一组"当前文档"信息（字符数/路径/修改状态）也要换成这个标签的
     updateDocumentStatus();
+
+    // 切到这个标签时顺手查一下：这个文件有没有被别的程序改过（7.3）。
+    // 放在这里是因为"用户刚把这个文档调到眼前"，此时提示最合时宜。
+    checkCurrentExternalChange();
 
     // 查找对话框跟着当前标签走：它只认一个编辑器，切标签不重新绑就会"对着旧文件替换"
     if (m_findDialog.isVisible()) {
@@ -1155,6 +1192,94 @@ void MainWindow::onReadOnlyDetected(FileManager *files, const QString &reason)
 {
     Q_UNUSED(files);
     QMessageBox::warning(this, QStringLiteral("文件是只读的"), reason);
+}
+
+// ============================ 外部修改提示（7.3）============================
+//
+// 场景：编辑器里开着 a.md，你用别的程序改了 a.md（或 git 切换了分支）。
+// 如果什么都不管，用户接着按 Ctrl+S 就会把别人的改动覆盖掉 —— 那是数据丢失。
+// 所以这里做两件事：
+//   1. 切标签、以及窗口重新获得焦点时，检查当前文档有没有被外部改过 → 问"重载 / 保留我的"；
+//   2. 保存之前再查一次 → 问"要不要覆盖磁盘上那份"。
+//
+// 机制在 FileManager 里（hasExternalChange / externalChangeReason / reloadFromDisk /
+// acceptCurrentDiskState），"问不问、怎么问"在界面层 —— 和这个项目其他地方的分工一致。
+
+void MainWindow::promptExternalChange(FileManager *files)
+{
+    if (files == nullptr || !files->hasExternalChange()) {
+        return;
+    }
+
+    const QString reason = files->externalChangeReason();
+    const bool dirty = files->isModified();
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("文件已被外部修改"));
+    box.setIcon(QMessageBox::Warning);
+    box.setText(reason);
+    box.setInformativeText(dirty ? QStringLiteral("你这个标签里还有未保存的修改。\n"
+                                                  "重载会用磁盘上的版本替换它们（不可撤销）。")
+                                 : QStringLiteral("要用磁盘上的版本重新载入吗？"));
+
+    QPushButton *reloadButton = box.addButton(QStringLiteral("重载"), QMessageBox::AcceptRole);
+    QPushButton *keepButton = box.addButton(dirty ? QStringLiteral("保留我的修改") : QStringLiteral("先不管"),
+                                           QMessageBox::RejectRole);
+    box.setDefaultButton(dirty ? keepButton : reloadButton);
+    box.exec();
+
+    if (box.clickedButton() == reloadButton) {
+        QString error;
+        if (!files->reloadFromDisk(&error)) {
+            QMessageBox::warning(this, QStringLiteral("重载失败"), error);
+            return;
+        }
+        if (EditorWidget *editor = editorFor(files)) {
+            // 先把内容灌回编辑器（setPlainText 会触发 textChanged → FileManager::setText，
+            // 所以要在重载之后再同步一次脏标志）
+            const QSignalBlocker blocker(editor);
+            editor->setPlainText(files->text());
+        }
+        files->setModified(false);
+        updateTabLabel(files);
+        if (files == currentFiles()) {
+            showSession(files, true);
+            updateDocumentStatus();
+            updateWindowTitle();
+        }
+        statusBar()->showMessage(QStringLiteral("已从磁盘重载：%1").arg(files->fileName()), 5000);
+        LOG_INFO("用户选择重载外部改动: %1", files->filePath());
+        return;
+    }
+
+    // 用户选择"保留我的"：把当前磁盘状态记成基准，别在每次切标签/切窗口时再问一遍
+    files->acceptCurrentDiskState();
+    statusBar()->showMessage(QStringLiteral("保留了编辑器里的内容（磁盘上的改动先不管）"), 5000);
+}
+
+void MainWindow::checkCurrentExternalChange()
+{
+    // 只查当前标签：一启动就把所有标签问一遍太吵，而且用户此刻也看不到别的标签
+    promptExternalChange(currentFiles());
+}
+
+bool MainWindow::confirmOverwriteIfChanged(FileManager *files)
+{
+    if (files == nullptr || !files->hasExternalChange()) {
+        return true;  // 没变化：不用问
+    }
+
+    const QMessageBox::StandardButton answer =
+        QMessageBox::warning(this,
+                             QStringLiteral("磁盘上的文件已被改动"),
+                             files->externalChangeReason() + QStringLiteral("\n\n仍要保存并覆盖它吗？"),
+                             QMessageBox::Save | QMessageBox::Cancel,
+                             QMessageBox::Cancel);
+    if (answer != QMessageBox::Save) {
+        statusBar()->showMessage(QStringLiteral("已取消保存（磁盘上的文件被别的程序改过了）"), 8000);
+        return false;
+    }
+    return true;
 }
 
 // 有未保存的修改时先问一句。返回 false = 用户取消，调用方必须中止当前操作。
@@ -1772,8 +1897,21 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event)
     event->ignore();
 }
 
-void MainWindow::dropEvent(QDropEvent *event)
+// 窗口重新获得焦点时检查当前标签有没有被外部改过（7.3）。
+// 为什么挑这个时机：用户"从别的程序切回来"正是刚刚可能改过这个文件的时刻。
+// 注意只在**焦点回来**时查，不在失去焦点时查 —— 后者会让"正要切过去改文件"的瞬间弹窗。
+bool MainWindow::event(QEvent *event)
 {
+    if (event->type() == QEvent::WindowActivate) {
+        // 先交给基类处理（它是窗口激活的一部分），再检查
+        const bool handled = QMainWindow::event(event);
+        checkCurrentExternalChange();
+        return handled;
+    }
+    return QMainWindow::event(event);
+}
+
+void MainWindow::dropEvent(QDropEvent *event){
     const QStringList paths = droppedFiles(event->mimeData());
     if (paths.isEmpty()) {
         event->ignore();

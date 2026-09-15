@@ -403,6 +403,67 @@ int main(int argc, char *argv[])
               QStringLiteral("缓存: 命中等统计也是新的（每个文档各算各的）"));
     }
 
+    // ============================ 3e. 外部修改检测（7.3）============================
+    {
+        const QString extDoc = work + QStringLiteral("/external.md");
+        FileUtils::writeFileBytes(extDoc, QStringLiteral("第一版内容\n").toUtf8());
+
+        FileManager files;
+        QString err;
+        check(files.openFile(extDoc, &err), QStringLiteral("外部修改: 打开文件"), err);
+
+        check(!files.hasExternalChange(), QStringLiteral("外部修改: 刚打开时没有变化"));
+        check(files.externalChangeReason().isEmpty(), QStringLiteral("外部修改: 原因也是空的"));
+
+        // 模拟"别的程序改了它"：内容变长（大小一定不同，不必依赖时间戳精度）
+        FileUtils::writeFileBytes(extDoc, QStringLiteral("第一版内容\n别人加了一行\n").toUtf8());
+        check(files.hasExternalChange(), QStringLiteral("外部修改: 磁盘被改之后能检测到"));
+        check(files.externalChangeReason().contains(QStringLiteral("别的程序")),
+              QStringLiteral("外部修改: 原因是「被别的程序修改」，能直接展示给用户"),
+              files.externalChangeReason());
+        check(files.text() == QStringLiteral("第一版内容\n"),
+              QStringLiteral("外部修改: 检测是「只报告」，编辑器里的内容没被动"),
+              files.text());
+
+        // ---- 用户选"保留我的"：把当前磁盘状态记成基准，不再反复提示 ----
+        files.acceptCurrentDiskState();
+        check(!files.hasExternalChange(), QStringLiteral("外部修改: 选择保留之后不再提示"));
+
+        // ---- 用户选"重载"：内容换成磁盘上的，脏标志清掉 ----
+        FileUtils::writeFileBytes(extDoc, QStringLiteral("磁盘上的第三版\n").toUtf8());
+        check(files.hasExternalChange(), QStringLiteral("外部修改: 又一次外部改动被检测到"));
+        err.clear();
+        check(files.reloadFromDisk(&err), QStringLiteral("外部修改: 重载成功"), err);
+        check(files.text() == QStringLiteral("磁盘上的第三版\n"),
+              QStringLiteral("外部修改: 内容换成了磁盘上的版本"), files.text());
+        check(!files.isModified(), QStringLiteral("外部修改: 重载后脏标志被清掉（刚读的就是磁盘上的）"));
+        check(!files.hasExternalChange(), QStringLiteral("外部修改: 重载之后基准就是磁盘，不再报变化"));
+
+        // ---- 文件被删掉也算外部变化，而且重载要失败得干净 ----
+        const QString beforeDelete = files.text();
+        QFile::remove(extDoc);
+        check(files.hasExternalChange(), QStringLiteral("外部修改: 文件被删掉也算变化"));
+        check(files.externalChangeReason().contains(QStringLiteral("删除")),
+              QStringLiteral("外部修改: 原因里说清是「被删除/移走」"), files.externalChangeReason());
+        err.clear();
+        check(!files.reloadFromDisk(&err), QStringLiteral("外部修改: 文件不在时重载失败"));
+        check(!err.isEmpty(), QStringLiteral("外部修改: 并且给出原因"), err);
+        check(files.text() == beforeDelete,
+              QStringLiteral("外部修改: ★重载失败时当前内容一个字节都没动"));
+
+        // 文件不在了、用户又选"保留我的"：不该每次都问
+        files.acceptCurrentDiskState();
+        check(!files.hasExternalChange(), QStringLiteral("外部修改: 文件不存在时也能把基准「记下来」"));
+
+        // 没保存过的新文档谈不上外部修改
+        FileManager fresh;
+        fresh.setText(QStringLiteral("还没保存过"));
+        check(!fresh.hasExternalChange(), QStringLiteral("外部修改: 新文档（没有路径）永远不报外部修改"));
+        err.clear();
+        check(!fresh.reloadFromDisk(&err), QStringLiteral("外部修改: 新文档没有可重载的东西（失败而不是崩）"));
+        check(!err.isEmpty(), QStringLiteral("外部修改: 并且说明了原因"), err);
+    }
+
     // ============================ 4. 只读文件 ============================
     {
         const QString pathRo = work + QStringLiteral("/readonly.md");

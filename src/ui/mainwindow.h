@@ -98,6 +98,10 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
+    // 窗口重新获得焦点（用户从别的程序切回来）时检查当前标签有没有被外部改过。
+    // 用 event() 而不是别的钩子：WindowActivate 只会送到这里，而且不需要重写 showEvent 之类。
+    bool event(QEvent *event) override;
+
 private slots:
     void onNewFile();       // 多标签时代 = 新建一个标签
     void onOpenFile();
@@ -187,6 +191,15 @@ private:
 
     // 有未保存的修改时先问一句（保存/放弃/取消）。返回 false = 用户取消，调用方必须中止。
     bool maybeSave(FileManager *files);
+
+    // ============================ 外部修改（7.3）============================
+    // 磁盘上的文件被别的程序改过了：问用户"重载 / 保留我的"。
+    // 只在真的有变化时问一次；用户选"保留我的"之后会把当前磁盘状态记成基准，不再反复问。
+    void promptExternalChange(FileManager *files);
+    // 检查当前标签有没有被外部改过（切标签、窗口重新获得焦点时调用）
+    void checkCurrentExternalChange();
+    // 保存之前：如果磁盘上那份被外部改过，先问一句"要不要覆盖"（返回 false = 别保存）
+    bool confirmOverwriteIfChanged(FileManager *files);
     // 保存某个会话（Ctrl+S 语义：没有路径时会转去另存为）。返回是否真的保存成功。
     bool saveSession(FileManager *files, EditorWidget *editor);
     bool saveSessionAs(FileManager *files, EditorWidget *editor);

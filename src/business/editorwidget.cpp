@@ -15,6 +15,7 @@
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTextFormat>
+#include <QToolTip>  // 行号栏的悬停提示
 #include <QtGlobal>
 
 namespace {
@@ -62,6 +63,20 @@ protected:
     void paintEvent(QPaintEvent *event) override
     {
         m_editor->paintLineNumbers(event);
+    }
+
+    // 悬停提示（7.3）：鼠标停在行号上时提示"第 N 行"。
+    // 为什么值得做：行号栏是窄条，用户想确认"现在鼠标对着的是哪一行"时，
+    // 眼睛要横着划很远去数；提示直接把答案放到光标旁边。
+    bool event(QEvent *event) override
+    {
+        if (event->type() == QEvent::ToolTip) {
+            auto *helpEvent = static_cast<QHelpEvent *>(event);
+            const int line = m_editor->lineNumberAtY(helpEvent->pos().y());
+            QToolTip::showText(helpEvent->globalPos(), QStringLiteral("第 %1 行").arg(line), this);
+            return true;  // 已经处理：别再走默认的（空）提示
+        }
+        return QWidget::event(event);
     }
 
 private:
@@ -401,6 +416,38 @@ void EditorWidget::contextMenuEvent(QContextMenuEvent *event)
 // ============================================================================
 // 跳转与插入代码块
 // ============================================================================
+
+int EditorWidget::lineNumberAtY(int y) const
+{
+    // 和绘制行号用同一套几何算法（firstVisibleBlock / blockBoundingGeometry / contentOffset）：
+    // 两处要是各算各的，迟早会出现"提示的行号和画出来的行号对不上"。
+    const int lines = document()->blockCount();
+    if (lines <= 0) {
+        return 1;
+    }
+
+    QTextBlock block = firstVisibleBlock();
+    if (!block.isValid()) {
+        return 1;
+    }
+
+    int bottom = qRound(blockBoundingGeometry(block).translated(contentOffset()).top())
+                 + qRound(blockBoundingRect(block).height());
+
+    while (block.isValid()) {
+        // 注意是 y < bottom，而不是"y 落在 [top, bottom) 之内"：
+        // y 在**第一行上方**（顶部留白，或者坐标是负数）时也该算这一行 ——
+        // 用区间判断的话，那种情况会一路落到循环外面、返回最后一行（提示就明显错了）。
+        if (y < bottom) {
+            return block.blockNumber() + 1;  // 行号 1 起算
+        }
+        block = block.next();
+        bottom += qRound(blockBoundingRect(block).height());
+    }
+
+    // 落在最后一行下方（视口底部空白处）：给最后一行，不要给出越界的数字
+    return lines;
+}
 
 void EditorWidget::goToLine(int line, int column)
 {

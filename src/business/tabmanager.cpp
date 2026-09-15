@@ -84,7 +84,8 @@ void TabManager::updateTab(int index, const TabInfo &info)
     const QString tip = info.filePath.isEmpty()
                             ? (info.title.isEmpty() ? name : info.title)
                             : info.filePath;
-    setTabToolTip(index, tip);
+    // 悬停提示里补一句修改状态（7.3）：标签上的 * 很小，提示里说清楚更稳
+    setTabToolTip(index, info.modified ? tip + QStringLiteral("\n（有未保存的修改）") : tip);
 
     // 顺手记下"这个标签对应磁盘上的哪个文件"：右键菜单要用它
     if (EditorWidget *editor = editorAt(index)) {

@@ -594,6 +594,69 @@ int main(int argc, char *argv[])
               QStringLiteral("内存: 缓存是 FileManager 的值成员（销毁文档即释放缓存）"));
     }
 
+    // ============================ K. 体验细节（7.3）============================
+    {
+        std::printf("---- K. 体验细节 ----\n");
+
+        // ---- 1. 未保存关闭提示（一直在，这里钉住它别被改掉）----
+        check(cpp.contains(QStringLiteral("bool MainWindow::maybeSave(FileManager *files)")),
+              QStringLiteral("未保存提示: maybeSave 的实现还在"));
+        check(cpp.contains(QStringLiteral("QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel")),
+              QStringLiteral("未保存提示: 三个选项齐全（保存 / 放弃 / 取消）"));
+        check(cpp.contains(QStringLiteral("ui->tabManager->setCloseConfirmHandler")),
+              QStringLiteral("未保存提示: 关标签走了确认回调"));
+        check(cpp.contains(QStringLiteral("for (int i = 0; i < ui->tabManager->count(); ++i)"))
+                  && cpp.contains(QStringLiteral("event->ignore();")),
+              QStringLiteral("未保存提示: 关窗口时逐个标签问一遍，取消就不关"));
+
+        // ---- 2. 外部修改提示重载（7.3 新做的）----
+        check(cpp.contains(QStringLiteral("void MainWindow::promptExternalChange(FileManager *files)")),
+              QStringLiteral("外部修改: 有提示对话框"));
+        check(cpp.contains(QStringLiteral("files->reloadFromDisk(")),
+              QStringLiteral("外部修改: 「重载」真的调了 FileManager::reloadFromDisk"));
+        check(cpp.contains(QStringLiteral("files->acceptCurrentDiskState()")),
+              QStringLiteral("外部修改: 「保留我的」会记住当前磁盘状态（不反复问）"));
+        check(cpp.contains(QStringLiteral("checkCurrentExternalChange();")),
+              QStringLiteral("外部修改: 有统一入口 checkCurrentExternalChange()"));
+        // 触发时机：切标签 + 窗口重新获得焦点 + 保存之前
+        {
+            const int calls = cpp.count(QStringLiteral("checkCurrentExternalChange();"));
+            check(calls >= 2, QStringLiteral("外部修改: 至少在两个时机检查（切标签 / 窗口激活）"),
+                  QStringLiteral("%1 处调用").arg(calls));
+            check(cpp.contains(QStringLiteral("QEvent::WindowActivate")),
+                  QStringLiteral("外部修改: 窗口重新获得焦点时会检查"));
+            check(cpp.contains(QStringLiteral("confirmOverwriteIfChanged(files)")),
+                  QStringLiteral("外部修改: 保存之前会问一句（免得覆盖别人的改动）"));
+        }
+        check(readFile(root + QStringLiteral("/src/core/storage/filemanager.cpp"))
+                  .contains(QStringLiteral("bool FileManager::hasExternalChange() const")),
+              QStringLiteral("外部修改: 检测机制在 FileManager 里（界面只负责问）"));
+
+        // ---- 3. 状态栏行列（一直在）；4. 拖拽排序（一直在）----
+        check(cpp.contains(QStringLiteral("行 %1，列 %2")), QStringLiteral("状态栏: 行列实时更新"));
+        check(readFile(root + QStringLiteral("/src/business/tabmanager.cpp")).contains(QStringLiteral("setMovable(true)")),
+              QStringLiteral("拖拽排序: 标签栏是可拖的"));
+        check(readFile(root + QStringLiteral("/src/business/tabmanager.cpp")).contains(QStringLiteral("tabOrderChanged")),
+              QStringLiteral("拖拽排序: 顺序变了会发信号（会话恢复靠它保序）"));
+
+        // ---- 5. 悬停提示 ----
+        {
+            const int statusTips = cpp.count(QStringLiteral("setStatusTip("));
+            check(statusTips >= 15, QStringLiteral("悬停: 菜单项普遍带状态栏提示"),
+                  QStringLiteral("%1 处 setStatusTip").arg(statusTips));
+            check(cpp.contains(QStringLiteral("m_newAction->setToolTip("))
+                      && cpp.contains(QStringLiteral("m_saveAction->setToolTip(")),
+                  QStringLiteral("悬停: 工具栏按钮也带了提示（含快捷键）"));
+            check(cpp.contains(QStringLiteral("第 %1 行"))
+                      && readFile(root + QStringLiteral("/src/business/editorwidget.cpp"))
+                             .contains(QStringLiteral("QEvent::ToolTip")),
+                  QStringLiteral("悬停: 行号栏上悬停会提示第几行"));
+            check(readFile(root + QStringLiteral("/src/business/tabmanager.cpp"))
+                      .contains(QStringLiteral("（有未保存的修改）")),
+                  QStringLiteral("悬停: 标签页提示里会说明有没有未保存的修改"));
+        }
+    }
+
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

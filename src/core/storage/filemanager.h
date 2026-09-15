@@ -146,6 +146,30 @@ public:
     // 这样"拒绝打开 .pdb"和"照常打开 GBK/UTF-16 的笔记"两条都不会错。
     static bool looksBinary(const QString &text);
 
+    // ============================ 外部修改检测（7.3）============================
+
+    // 打开/保存时记下磁盘状态（修改时间 + 大小），之后拿它和**当前**磁盘状态比：
+    // 不一致 = 这个文件被别的程序改过了（编辑器里这份已经是旧的）。
+    //
+    // 本类只**报告**、不自动处理：要不要用磁盘上的版本覆盖正在编辑的内容，
+    // 是"可能丢数据"的决定，必须由用户来定（界面层负责问）。
+    // 文件在磁盘上被删掉了也算外部修改（externalChangeReason 会说明是哪种）。
+    bool hasExternalChange() const;
+
+    // 空字符串 = 没有变化；否则是能直接展示的原因（"已被别的程序修改"/"已被删除"）
+    QString externalChangeReason() const;
+
+    // 把"当前磁盘状态"记成新的基准，于是 hasExternalChange() 变回 false。
+    // 用途：用户选择"保留我的修改、先不管磁盘上那份"时，
+    // 别在每次切标签/切窗口时都再问一遍。
+    void acceptCurrentDiskState();
+
+    // 重新从磁盘读一遍（用户选择"重载"时用）。
+    // 成功：内容换成磁盘上的、脏标志清掉、缓存也跟着更新。
+    // 失败：false + error，而且**当前内容一个字节都不动** ——
+    //       重载失败不该把用户正在看的东西弄丢。
+    bool reloadFromDisk(QString *error = nullptr);
+
     // ============================ 版本控制（4.2.2）============================
 
     // 本文件管理器内嵌的版本控制服务：查历史、看差异都通过它。
@@ -218,6 +242,11 @@ private:
     bool m_autoSnapshot = true;    // 保存后自动打快照
     Encoding m_encoding = Encoding::Utf8;  // 当前文档的编码（打开时检测，保存时按它写回）
     bool m_readOnly = false;               // 当前文件是否只读
+
+    // "我读到的磁盘状态"：外部修改检测的基准（见 hasExternalChange）。
+    // 文件不存在时 m_diskSize 保持 -1，用它区分"本来就没保存过"和"被删了"。
+    QDateTime m_diskModifiedAt;
+    qint64 m_diskSize = -1;
 };
 
 }  // namespace markdown_editor::core::storage

@@ -119,6 +119,10 @@ void FileManager::applyOpenedContent(const QString &path,
     m_document.setFilePath(path);
     m_document.setModified(false);
 
+    // 记下"我读到的是这个状态"：外部修改检测的基准（7.3）
+    m_diskModifiedAt = info.lastModified();
+    m_diskSize = info.size();
+
     emit modificationChanged(false);
     emit fileOpened(path);
 
@@ -170,6 +174,96 @@ bool FileManager::looksBinary(const QString &text)
 
     // 要求"数量够多"且"比例够高"：少数控制字符（老文件用 ^Z 结尾之类）不该被判成二进制
     return suspicious >= 16 && suspicious * 10 > sample;
+}
+
+// ============================ 外部修改检测（7.3）============================
+
+QString FileManager::externalChangeReason() const
+{
+    const QString path = m_document.getFilePath();
+    if (path.isEmpty() || m_diskSize < 0) {
+        return QString();  // 还没保存过的文档：谈不上"被外部修改"
+    }
+
+    const QFileInfo info(path);
+    if (!info.exists()) {
+        return QStringLiteral("这个文件在磁盘上已经被删除或移走了：\n%1").arg(path);
+    }
+
+    // 判据和缓存新鲜度用的是同一套（修改时间 + 大小）：只看时间会在"同一秒内改了内容"
+    // 时漏判，只看大小会在"改了同样多的字符"时漏判，两个一起看足够稳。
+    if (info.size() != m_diskSize || info.lastModified() != m_diskModifiedAt) {
+        return QStringLiteral("这个文件已被别的程序修改过：\n%1\n\n"
+                              "磁盘上的版本（%2 字节）和你正在编辑的这份不一样了。")
+            .arg(path)
+            .arg(info.size());
+    }
+
+    return QString();
+}
+
+bool FileManager::hasExternalChange() const
+{
+    return !externalChangeReason().isEmpty();
+}
+
+void FileManager::acceptCurrentDiskState()
+{
+    const QString path = m_document.getFilePath();
+    if (path.isEmpty()) {
+        return;
+    }
+
+    const QFileInfo info(path);
+    if (!info.exists()) {
+        // 文件不在了，用户又选择"保留我的"：就把基准标成"不存在"，
+        // 免得每次切标签都再问一遍（他下次保存时会重新把它写出来）。
+        m_diskModifiedAt = QDateTime();
+        m_diskSize = -1;
+        return;
+    }
+
+    m_diskModifiedAt = info.lastModified();
+    m_diskSize = info.size();
+    LOG_INFO("已忽略外部改动（保留编辑器里的内容）: %1", path);
+}
+
+bool FileManager::reloadFromDisk(QString *error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+
+    const QString path = m_document.getFilePath();
+    if (path.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("这个文档还没保存过，没有可以重载的磁盘文件");
+        }
+        return false;
+    }
+
+    QByteArray raw;
+    if (!FileUtils::readFileBytes(path, raw, error)) {
+        // 读不了就什么都不动：重载失败绝不能把用户正在看的内容弄丢
+        LOG_WARN("重载失败，保持当前内容: %1", path);
+        return false;
+    }
+
+    const Encoding detected = detectEncoding(raw);
+    const QString content = decode(raw, detected);
+    if (looksBinary(content)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("磁盘上的这个文件现在看起来是二进制内容，没有重载：\n%1").arg(path);
+        }
+        return false;
+    }
+
+    const QFileInfo info(path);
+    applyOpenedContent(path, info, content, detected);  // 内容/编码/只读/脏标志/基准一起更新
+    rememberInCache(path, content, detected, raw.size());
+
+    LOG_INFO("已从磁盘重载: %1（编码 %2，%3 字节）", path, encodingName(detected), raw.size());
+    return true;
 }
 
 bool FileManager::saveFile(QString *error)
@@ -252,6 +346,14 @@ bool FileManager::writeTo(const QString &path, QString *error)
     m_document.setFilePath(path);  // 「另存为」语义：写完就认这个新路径
     m_document.setModified(false);
     m_readOnly = isReadOnlyFile(path);
+
+    // 刚写进去的就是"磁盘上的当前状态"：更新基准，于是 hasExternalChange() 立刻变回 false
+    //（否则用户刚保存完就会被提示"文件被外部修改了"，那是荒唐的）
+    {
+        const QFileInfo written(path);
+        m_diskModifiedAt = written.lastModified();
+        m_diskSize = written.size();
+    }
 
     emit modificationChanged(false);
     emit fileSaved(path);

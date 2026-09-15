@@ -241,6 +241,20 @@ int main(int argc, char *argv[])
         check(tabs.tabFilePath(1).isEmpty(), QStringLiteral("路径: 没路径的标签返回空"));
         check(tabs.tabFilePath(99).isEmpty(), QStringLiteral("路径: 越界返回空（不崩）"));
 
+        // 悬停提示（7.3）：有路径的标签提示完整路径，改过的再加一句"有未保存的修改"
+        check(tabs.tabToolTip(0) == QStringLiteral("D:/notes/a.md"),
+              QStringLiteral("提示: 未修改时就是完整路径"), tabs.tabToolTip(0));
+        {
+            TabManager::TabInfo modifiedInfo = infoA;
+            modifiedInfo.modified = true;
+            tabs.updateTab(0, modifiedInfo);
+            check(tabs.tabToolTip(0).contains(QStringLiteral("未保存")),
+                  QStringLiteral("提示: 有未保存修改时提示里会说明"), tabs.tabToolTip(0));
+            check(tabs.tabText(0).endsWith(QStringLiteral("*")),
+                  QStringLiteral("提示: 标签标题上的 * 也还在"), tabs.tabText(0));
+            tabs.updateTab(0, infoA);  // 复原
+        }
+
         // ---- 菜单结构 ----
         QMenu *menu = tabs.createTabContextMenu(0);
         QStringList texts;

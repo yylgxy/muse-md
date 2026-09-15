@@ -58,6 +58,11 @@ public:
     // 公开出来是为了让布局/测试能问它，也是行号栏子控件 sizeHint 的来源。
     int lineNumberAreaWidth() const;
 
+    // 视口里 y 坐标处的行号（1 起算，夹在 [1, 总行数] 内）。
+    // 行号栏的悬停提示要用它（鼠标停在某个行号上时提示"第 N 行"），
+    // 公开出来也让这条映射能被单独测 —— 它和绘制行号用的是同一套几何计算。
+    int lineNumberAtY(int y) const;
+
     int indentWidth() const;
     void setIndentWidth(int spaces);
 

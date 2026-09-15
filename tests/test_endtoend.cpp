@@ -531,6 +531,48 @@ int main(int argc, char *argv[])
     }
 
     // ==================================================================
+    // 7.3 体验细节：文件被外部修改 → 提示 → 重载
+    // ==================================================================
+    {
+        std::printf("---- 7.3 外部修改与重载 ----\n");
+
+        const QString liveDoc = work + QStringLiteral("/外部改动.md");
+        {
+            QFile file(liveDoc);
+            file.open(QIODevice::WriteOnly);
+            file.write(QStringLiteral("编辑器里看到的版本\n").toUtf8());
+        }
+
+        FileManager files;
+        QString error;
+        check(files.openFile(liveDoc, &error), QStringLiteral("7.3 外部修改: 打开文件"), error);
+        check(!files.hasExternalChange(), QStringLiteral("7.3 外部修改: 刚打开时没有变化"));
+
+        // 用户在编辑器里改了内容（还没保存）
+        files.setText(QStringLiteral("编辑器里看到的版本\n我又写了一行\n"));
+        check(files.isModified(), QStringLiteral("7.3 外部修改: 本地有未保存的修改"));
+
+        // 别的程序改了这个文件
+        {
+            QFile file(liveDoc);
+            file.open(QIODevice::WriteOnly);
+            file.write(QStringLiteral("别的程序写进来的版本\n").toUtf8());
+        }
+        check(files.hasExternalChange(),
+              QStringLiteral("7.3 外部修改: 检测到「文件被别的程序改了」（界面据此弹窗）"),
+              files.externalChangeReason());
+        check(files.text().contains(QStringLiteral("我又写了一行")),
+              QStringLiteral("7.3 外部修改: 检测本身不动内容（丢不丢由用户决定）"));
+
+        // 用户选择"重载"：内容换成磁盘上的
+        check(files.reloadFromDisk(&error), QStringLiteral("7.3 外部修改: 选择重载后成功"), error);
+        check(files.text() == QStringLiteral("别的程序写进来的版本\n"),
+              QStringLiteral("7.3 外部修改: 内容确实换成了磁盘上的版本"), files.text());
+        check(!files.isModified(), QStringLiteral("7.3 外部修改: 重载后不再是已修改"));
+        check(!files.hasExternalChange(), QStringLiteral("7.3 外部修改: 重载后基准同步，不再报变化"));
+    }
+
+    // ==================================================================
     std::printf("\n---- 需要人工确认的项（受控环境里 Chromium 起不来）----\n");
     manual(QStringLiteral("预览区显示、滚动同步、点击预览跳源码"));
     manual(QStringLiteral("PDF 导出的内容与排版"));

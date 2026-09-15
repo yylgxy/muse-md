@@ -30,6 +30,15 @@ FindReplaceDialog::FindReplaceDialog(QWidget *parent) : QDialog(parent)
     m_replaceButton = new QPushButton(QStringLiteral("替换"), this);
     m_replaceAllButton = new QPushButton(QStringLiteral("全部替换"), this);
 
+    // 悬停提示（7.3）：把"回车能干什么""全部替换能不能撤销"这类事说清楚
+    m_searchEdit->setToolTip(QStringLiteral("要查找的内容；回车 = 查找下一个"));
+    m_replaceEdit->setToolTip(QStringLiteral("替换成什么；回车 = 替换当前这一处"));
+    m_caseCheck->setToolTip(QStringLiteral("勾上之后严格区分大小写"));
+    m_findPrevButton->setToolTip(QStringLiteral("往上找；到顶了会回到文档末尾"));
+    m_findNextButton->setToolTip(QStringLiteral("往下找；到底了会回到文档开头"));
+    m_replaceButton->setToolTip(QStringLiteral("替换当前这一处（没选中时会先跳到下一处再替换）"));
+    m_replaceAllButton->setToolTip(QStringLiteral("替换全文；整批算一步，一次 Ctrl+Z 就能全部退回"));
+
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
 
