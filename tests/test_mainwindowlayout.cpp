@@ -28,6 +28,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QMimeData>
@@ -387,6 +388,85 @@ int main(int argc, char *argv[])
               QStringLiteral("记忆: 关窗口时保存（而且是在用户确认关闭之后）"));
         check(cpp.contains(QStringLiteral("QFileInfo::exists(path)")),
               QStringLiteral("记忆: 上次的文件在磁盘上没了就跳过（不弹窗打扰）"));
+    }
+
+    // ============================ H. 构建清单一致性（.cpp/.h 有没有登记进 CMakeLists）============================
+    //
+    // 为什么加这一段：这个项目的"验证构建"是手写 cl/link 的（沙箱里 cmake 配不动），
+    // **完全绕过 CMake**。于是"新加了一个 .cpp 却忘了写进模块的 CMakeLists"这种错误
+    // 在我的验证里永远看不见，只有在 Qt Creator 里构建才会炸出来（典型表现是
+    // LNK2019 找不到某个类的成员函数 —— 那个文件根本没被编译）。
+    // 真实踩过一次（SessionState），所以这里用测试把它钉住：源码树里每个 .cpp/.h
+    // 都必须出现在它所属模块的 CMakeLists.txt 里。
+    {
+        std::printf("---- H. 构建清单一致性 ----\n");
+
+        struct Module
+        {
+            const char *dir;   // 源码目录
+            const char *cml;   // 它对应的 CMakeLists.txt
+        };
+        const QList<Module> modules = {
+            {"src/infrastructure", "src/infrastructure/CMakeLists.txt"},
+            {"src/core/document", "src/core/document/CMakeLists.txt"},
+            {"src/core/storage", "src/core/storage/CMakeLists.txt"},
+            {"src/business", "src/business/CMakeLists.txt"},
+            {"src/ui", "src/ui/CMakeLists.txt"},
+            {"src/app", "src/app/CMakeLists.txt"},
+        };
+
+        int checked = 0;
+        QStringList unregistered;
+        for (const Module &module : modules) {
+            QDir dir(root + QLatin1Char('/') + QLatin1String(module.dir));
+            const QString manifestPath = root + QLatin1Char('/') + QLatin1String(module.cml);
+            const QString manifest = readFile(manifestPath);
+            if (manifest.isEmpty()) {
+                unregistered << QStringLiteral("(读不到 %1)").arg(manifestPath);
+                continue;
+            }
+            const QFileInfoList files = dir.entryInfoList(QStringList{QStringLiteral("*.cpp"), QStringLiteral("*.h")}, QDir::Files);
+            for (const QFileInfo &file : files) {
+                ++checked;
+                if (!manifest.contains(file.fileName())) {
+                    unregistered << QStringLiteral("%1/%2").arg(QLatin1String(module.dir), file.fileName());
+                }
+            }
+        }
+        check(!unregistered.isEmpty() ? false : true,
+              QStringLiteral("清单: 源码树里每个 .cpp/.h 都写进了所属模块的 CMakeLists（共 %1 个）").arg(checked),
+              unregistered.join(QStringLiteral(", ")));
+        check(checked > 40, QStringLiteral("清单: 这次真的检查了足够多的文件（不是空跑）"),
+              QStringLiteral("%1 个").arg(checked));
+
+        // 测试文件也要登记，否则 ctest 里会少一个而没人发现
+        const QString testsManifest = readFile(root + QStringLiteral("/tests/CMakeLists.txt"));
+        QStringList missingTests;
+        const QFileInfoList testFiles =
+            QDir(root + QStringLiteral("/tests")).entryInfoList(QStringList{QStringLiteral("*.cpp")}, QDir::Files);
+        for (const QFileInfo &file : testFiles) {
+            if (!testsManifest.contains(file.fileName())) {
+                missingTests << file.fileName();
+            }
+        }
+        check(missingTests.isEmpty(),
+              QStringLiteral("清单: 每个测试文件都登记在 tests/CMakeLists.txt（共 %1 个）").arg(testFiles.size()),
+              missingTests.join(QStringLiteral(", ")));
+
+        // 资源文件也要登记在 .qrc 里，否则运行期读不到（样式表/模板都是这么进 exe 的）
+        const QString qrc = readFile(root + QStringLiteral("/resources/resources.qrc"));
+        QStringList missingResources;
+        QDirIterator it(root + QStringLiteral("/resources"), QStringList{QStringLiteral("*.html"), QStringLiteral("*.qss")},
+                        QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            const QString relative = QDir(root + QStringLiteral("/resources")).relativeFilePath(path);
+            if (!qrc.contains(relative)) {
+                missingResources << relative;
+            }
+        }
+        check(missingResources.isEmpty(), QStringLiteral("清单: 每个资源文件都登记在 resources.qrc"),
+              missingResources.join(QStringLiteral(", ")));
     }
 
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);
