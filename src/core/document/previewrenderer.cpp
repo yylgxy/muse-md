@@ -1,5 +1,6 @@
 #include "previewrenderer.h"
 
+#include "codehighlighter.h"
 #include "logger.h"
 #include "markdownparser.h"
 #include "syncbridge.h"
@@ -269,7 +270,10 @@ void PreviewRenderer::pushNow()
         return;
     }
 
-    const QString html = MarkdownParser::parseToHtml(m_desired);
+    // 渲染 → 代码高亮：把 HTML 里 <pre><code class="language-x"> 的内容换成带 span 的高亮版本。
+    // ★ 高亮放在 C++ 里而不是页面里的 JS，是为了让预览、导出的 HTML、导出的 PDF
+    //   三条路共用同一份结果（JS 方案得内联脚本，PDF 还得赌"打印时脚本已经跑完"）。
+    const QString html = CodeHighlighter::highlightCodeBlocks(MarkdownParser::parseToHtml(m_desired));
     const QList<int> lineMap = SyncBridge::buildLineMap(m_desired);
 
     m_page->runJavaScript(buildApplyScript(html, lineMap));

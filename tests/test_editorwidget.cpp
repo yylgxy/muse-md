@@ -430,7 +430,66 @@ int main(int argc, char *argv[])
         check(emptyEditor.textCursor().blockNumber() == 0, QStringLiteral("goToLine: 空文档里跳转 -> 还是第 1 行（不崩）"));
     }
 
-    // ============================ I. 语法高亮器已绑定 ============================
+    // ============================ I. 插入代码块（5.7：选语言 → 围栏）============================
+    {
+        EditorWidget editor;
+
+        // 空文档：插一个 python 围栏，光标落在中间那行（等着用户写代码）
+        editor.clear();
+        editor.insertCodeBlock(QStringLiteral("python"));
+        check(editor.toPlainText() == QStringLiteral("```python\n\n```\n"),
+              QStringLiteral("insertCodeBlock: 插入 ```lang 围栏，中间留一行空行"),
+              editor.toPlainText().replace(QLatin1Char('\n'), QStringLiteral("\\n")));
+        check(editor.textCursor().blockNumber() == 1 && editor.textCursor().positionInBlock() == 0,
+              QStringLiteral("insertCodeBlock: 光标停在代码区第一行"),
+              QStringLiteral("block=%1 col=%2").arg(editor.textCursor().blockNumber()).arg(editor.textCursor().positionInBlock()));
+
+        // 没有语言名：就是一个普通围栏（高亮器会按"没语言"处理）
+        editor.clear();
+        editor.insertCodeBlock(QString());
+        check(editor.toPlainText() == QStringLiteral("```\n\n```\n"),
+              QStringLiteral("insertCodeBlock: 语言为空时不写语言名"));
+
+        // 光标在行中间：必须补一个换行，否则围栏不成立
+        editor.setPlainText(QStringLiteral("abc"));
+        QTextCursor midCursor = editor.textCursor();
+        midCursor.movePosition(QTextCursor::End);
+        editor.setTextCursor(midCursor);
+        editor.insertCodeBlock(QStringLiteral("cpp"));
+        check(editor.toPlainText() == QStringLiteral("abc\n```cpp\n\n```\n"),
+              QStringLiteral("insertCodeBlock: 光标在行中间时先换行（围栏独占一行）"),
+              editor.toPlainText().replace(QLatin1Char('\n'), QStringLiteral("\\n")));
+
+        // 有选中内容：选区直接变成代码块里的代码
+        editor.setPlainText(QStringLiteral("x = 1"));
+        QTextCursor selectAll = editor.textCursor();
+        selectAll.select(QTextCursor::Document);
+        editor.setTextCursor(selectAll);
+        editor.insertCodeBlock(QStringLiteral("python"));
+        check(editor.toPlainText() == QStringLiteral("```python\nx = 1\n```\n"),
+              QStringLiteral("insertCodeBlock: 选中的内容被包进代码块（不多空行、不丢内容）"),
+              editor.toPlainText().replace(QLatin1Char('\n'), QStringLiteral("\\n")));
+
+        // 不认识的语言也照插不误：高亮器会忽略它，但文档结构仍然是对的
+        editor.clear();
+        editor.insertCodeBlock(QStringLiteral("klingon"));
+        check(editor.toPlainText().contains(QStringLiteral("```klingon")),
+              QStringLiteral("insertCodeBlock: 不认识的语言照样插（高亮器那边会原样显示）"));
+
+        // 连插两个：第二个插在光标处 —— 插完光标停在上一块的代码行（为了立刻能打字），
+        // 所以"接着再插一个"要先自己把光标移到文档末尾。这里按这个正常用法验证。
+        editor.clear();
+        editor.insertCodeBlock(QStringLiteral("python"));
+        QTextCursor endCursor = editor.textCursor();
+        endCursor.movePosition(QTextCursor::End);
+        editor.setTextCursor(endCursor);
+        editor.insertCodeBlock(QStringLiteral("go"));
+        check(editor.toPlainText() == QStringLiteral("```python\n\n```\n```go\n\n```\n"),
+              QStringLiteral("insertCodeBlock: 连插两个（光标在末尾时）互不干扰"),
+              editor.toPlainText().replace(QLatin1Char('\n'), QStringLiteral("\\n")));
+    }
+
+    // ============================ J. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;
         check(editor.highlighter() != nullptr, QStringLiteral("高亮: 控件自己绑定了高亮器"));

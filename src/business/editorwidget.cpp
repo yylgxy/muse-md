@@ -129,7 +129,7 @@ void EditorWidget::applyIndentWidth()
 }
 
 // ============================================================================
-// 跳转
+// 跳转与插入代码块
 // ============================================================================
 
 void EditorWidget::goToLine(int line, int column)
@@ -151,6 +151,46 @@ void EditorWidget::goToLine(int line, int column)
 
     setTextCursor(cursor);
     centerCursor();  // 让目标行落在屏幕中间，而不是贴着上边缘
+    setFocus();
+}
+
+void EditorWidget::insertCodeBlock(const QString &language)
+{
+    QTextCursor cursor = textCursor();
+
+    // QTextCursor 用 U+2029 表示换行（selectedText() 里不会给 '\n'），所以要换回来
+    QString selected = cursor.selectedText();
+    selected.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+
+    const QString name = language.trimmed();
+    const QString fence = name.isEmpty() ? QStringLiteral("```") : QStringLiteral("```") + name;
+
+    // 围栏必须独占一行：插入点在这一行中间时先补一个换行，否则这堆反引号根本不成围栏。
+    // 判断要用**插入点**（有选区时是选区起点），不能用 cursor.atBlockStart() —— 有选区时
+    // 那个问的是光标的活动端，全选一段文字会得出错误的答案（然后凭空多出一个空行）。
+    const int insertAt = cursor.hasSelection() ? cursor.selectionStart() : cursor.position();
+    QTextCursor probe(cursor);
+    probe.setPosition(insertAt);
+    const QString prefix = probe.atBlockStart() ? QString() : QStringLiteral("\n");
+
+    QString block = prefix + fence + QLatin1Char('\n');
+    const int codeStart = insertAt + block.size();  // 代码区第一行的行首
+    if (selected.isEmpty()) {
+        block += QLatin1Char('\n');  // 留一行空行给用户写代码
+    } else {
+        block += selected;
+        if (!selected.endsWith(QLatin1Char('\n'))) {
+            block += QLatin1Char('\n');
+        }
+    }
+    block += QStringLiteral("```\n");
+
+    cursor.insertText(block);  // 有选区时这一步会把选区替换掉
+
+    // 光标落到代码区第一行（而不是留在闭合围栏之后）
+    QTextCursor target = cursor;
+    target.setPosition(codeStart);
+    setTextCursor(target);
     setFocus();
 }
 

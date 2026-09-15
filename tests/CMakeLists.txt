@@ -258,11 +258,25 @@ target_link_libraries(test_exporter
 )
 add_test(NAME exporter COMMAND test_exporter)
 
+# ---------------- CodeHighlighter 契约测试（5.7）----------------
+# 只需要 core_document，但要**带上 qrc**：测试会检查预览模板里的 CSS
+# 真的定义了高亮器产出的那些 hljs-* 类名（那是"高亮器 ↔ 样式"之间的契约）。
+# 不需要 QApplication：分词和拼 HTML 都是纯字符串处理。
+add_executable(test_codehighlighter
+    test_codehighlighter.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
+)
+target_link_libraries(test_codehighlighter
+    core_document
+    Qt6::Core
+)
+add_test(NAME codehighlighter COMMAND test_codehighlighter)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

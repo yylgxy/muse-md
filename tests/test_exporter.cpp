@@ -210,6 +210,21 @@ int main(int argc, char *argv[])
         check(written.contains(QStringLiteral("<pre><code")), QStringLiteral("导出: 代码块渲染正确"));
         check(written.contains(QStringLiteral("font-family")), QStringLiteral("导出: 样式在文件里"));
 
+        // 代码高亮（5.7）也要在导出文件里 —— 预览和导出走的是同一条渲染+高亮路径
+        {
+            const QString codeMarkdown = QStringLiteral("```cpp\nint main() { return 0; }  // 注释\n```\n");
+            const QString codeTarget = base + QStringLiteral("/highlight.html");
+            QString codeError;
+            check(exporter.exportHtml(codeMarkdown, docs, codeTarget, options, nullptr, &codeError),
+                  QStringLiteral("导出: 带代码块的文档导出成功"), codeError);
+            const QString codeHtml = readFile(codeTarget);
+            check(codeHtml.contains(QStringLiteral("hljs-type\">int</span>"))
+                      && codeHtml.contains(QStringLiteral("hljs-comment\">// 注释</span>")),
+                  QStringLiteral("导出: 代码块在导出文件里是**带高亮 span** 的（和预览一致）"));
+            check(codeHtml.contains(QStringLiteral(".hljs-keyword")),
+                  QStringLiteral("导出: 高亮的 CSS 也跟着抽进来了（否则 span 没有颜色）"));
+        }
+
         // 目录不存在要自动建：用户手打一个不存在的路径很常见
         const QString deep = base + QStringLiteral("/a/b/c/deep.html");
         error.clear();

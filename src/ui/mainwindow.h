@@ -85,6 +85,9 @@ private slots:
     void onExportHtml();
     void onExportPdf();
 
+    // 插入代码块（5.7）：先选语言，再把围栏插到当前光标处（预览会立刻按这种语言着色）
+    void onInsertCodeBlock();
+
     // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
     void onSearchResultActivated(const QString &filePath, int line);
 

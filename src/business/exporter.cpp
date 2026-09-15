@@ -1,5 +1,6 @@
 #include "exporter.h"
 
+#include "codehighlighter.h"
 #include "logger.h"
 #include "markdownparser.h"
 
@@ -13,6 +14,7 @@
 #include <QUrl>
 #include <QWebEnginePage>
 
+using markdown_editor::core::document::CodeHighlighter;
 using markdown_editor::core::document::MarkdownParser;
 
 namespace {
@@ -104,7 +106,8 @@ QString Exporter::defaultTitleFor(const QString &filePath)
 
 QString Exporter::standaloneHtml(const QString &markdown, const QString &title)
 {
-    const QString body = MarkdownParser::parseToHtml(markdown);
+    // 和预览走同一条渲染 + 高亮路径：导出文件里的代码块配色和预览里一模一样
+    const QString body = CodeHighlighter::highlightCodeBlocks(MarkdownParser::parseToHtml(markdown));
     const QString shownTitle = escapedTitle(title.trimmed().isEmpty() ? QStringLiteral("未命名") : title);
 
     // 样式一律内联在 <style> 里（这就是"独立文件"的含义：拷到任何地方、断网也照样好看）。

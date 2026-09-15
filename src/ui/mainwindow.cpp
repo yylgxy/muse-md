@@ -3,6 +3,7 @@
 #include "ui_mainwindow.h"  // uic 根据 mainwindow.ui 生成（AUTOUIC 负责，不用手工写）
 
 #include "editorwidget.h"       // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
+#include "codehighlighter.h"    // 5.7：代码高亮（"插入代码块"的语言列表就是它提供的）
 #include "editorworkbench.h"    // .ui 中央区那台"工作台"（分屏 + 预览 + 双向同步）
 #include "exportdialog.h"       // 5.6：导出对话框（只收集设置，干活的是 Exporter）
 #include "filetreeview.h"       // 5.4.1：左边的文件树侧边栏（.ui 里已经有一块 FileTreeView）
@@ -44,6 +45,8 @@ using markdown_editor::core::storage::VersionControl;
 // 渲染管线的类型要写全名：它和 FileManager 不一样，以前只用到它的成员函数、不用提名字，
 // 现在要连它的信号（contentSkipped / rendererRestarted），所以需要这个 using。
 using markdown_editor::core::document::PreviewRenderer;
+// 代码高亮（5.7）："插入代码块"的语言列表和显示名都来自它
+using markdown_editor::core::document::CodeHighlighter;
 // 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
 // 成员函数体里直接用短名字就行，不会和全局作用域冲突。
 // 预览渲染管线与同步桥也不在这里了：它们归 EditorWorkbench 所有。
@@ -322,6 +325,13 @@ void MainWindow::initMenuBar()
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
     m_clearCacheAction = toolsMenu->addAction(QStringLiteral("清空内存缓存(&C)"));
     connect(m_clearCacheAction, &QAction::triggered, this, &MainWindow::onClearCache);
+
+    // ---- 插入（5.7）----
+    // 代码块的语言**由你选**：这里列出的就是高亮器认识的全部语言（30 多种）。
+    // 也可以直接在文档里手写 ```python —— 两种方式等价，因为语言名是同一个词。
+    toolsMenu->addSeparator();
+    QAction *insertCodeAction = toolsMenu->addAction(QStringLiteral("插入代码块(&K)…"));
+    connect(insertCodeAction, &QAction::triggered, this, &MainWindow::onInsertCodeBlock);
 }
 
 void MainWindow::initToolBar()
@@ -1214,6 +1224,50 @@ void MainWindow::offerToOpenExportedFile(const QString &path, bool asPdf)
     } else if (box.clickedButton() == openDirButton) {
         QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
     }
+}
+
+// ============================ 插入代码块（5.7）============================
+
+// "我要代码高亮，支持各种主流语言，需要自己去选择" —— 选择就发生在这里：
+// 下拉框里列的是高亮器真正认识的语言（CodeHighlighter::supportedLanguages()），
+// 选完插进去的 ```语言 会被预览、HTML 导出、PDF 导出同一套规则着色。
+void MainWindow::onInsertCodeBlock()
+{
+    EditorWidget *editor = currentEditor();
+    if (editor == nullptr) {
+        return;
+    }
+
+    const QStringList languages = CodeHighlighter::supportedLanguages();
+    QStringList shown;
+    shown.reserve(languages.size());
+    for (const QString &id : languages) {
+        // "C++ (cpp)"：前面是给人看的名字，括号里是真正写进文档的语言名
+        shown << QStringLiteral("%1 (%2)").arg(CodeHighlighter::displayNameFor(id), id);
+    }
+
+    bool accepted = false;
+    const QString chosen = QInputDialog::getItem(this,
+                                                 QStringLiteral("插入代码块"),
+                                                 QStringLiteral("选一种语言（它决定预览里怎么着色）："),
+                                                 shown,
+                                                 0,
+                                                 false,
+                                                 &accepted);
+    if (!accepted || chosen.isEmpty()) {
+        return;
+    }
+
+    const int index = shown.indexOf(chosen);
+    if (index < 0 || index >= languages.size()) {
+        return;
+    }
+    const QString language = languages.at(index);
+
+    editor->insertCodeBlock(language);
+    statusBar()->showMessage(QStringLiteral("已插入 %1 代码块：在中间那行写代码，预览会按这种语言着色")
+                                 .arg(CodeHighlighter::displayNameFor(language)),
+                             8000);
 }
 
 // ============================ 缓存（4.2.3）============================
