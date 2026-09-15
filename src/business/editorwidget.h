@@ -137,6 +137,27 @@ public:
     // 是的话再按回车表示"我不想继续这个列表了"，调用方应该把标记清掉再换行。
     static bool isBareListMarker(const QString &line);
 
+    // ============================ 大文档快速模式（7.2 性能）============================
+
+    // 超过这个字符数就进入"快速模式"。
+    // 为什么是字符数而不是字节：文档在内存里就是 QString，判断成本是 O(1)；
+    // 30 万字符大约相当于 1MB 的中文 UTF-8 文件、或 600KB 的英文文件 ——
+    // 也就是"规格里说的 1MB 文件"，而正常笔记（几万字）离它还远。
+    static constexpr int kFastModeThresholdChars = 300000;
+
+    // 纯规则：这个长度的文档要不要进快速模式（能单独测）。
+    // 退出快速模式的门槛比进入低 10%（迟滞）：否则文档正好卡在阈值上时，
+    // 每敲一个字都会在高亮/不高亮之间来回抖。
+    static bool prefersFastMode(int characterCount, bool currentlyFast = false);
+
+    bool isFastMode() const;
+
+    // 语法高亮的总开关。快速模式下会把它关掉 —— 编辑大文件时唯一真正贵的就是它：
+    // QSyntaxHighlighter 要把每一行拿十几条正则过一遍，几十万字符的文档上
+    // 每敲一个字都会明显卡顿，而"看得清语法"在那种规模的文档里意义不大。
+    void setHighlightingEnabled(bool enabled);
+    bool isHighlightingEnabled() const;
+
 signals:
     // 光标位置变了。行、列**都从 1 起算**（人类数的第几行第几列）。
     void cursorMoved(int line, int column);
@@ -145,6 +166,9 @@ signals:
     void findRequested();
     // 右键菜单里选了"插入代码块…"：语言列表在高亮器那边，所以也交给主窗口
     void insertCodeBlockRequested();
+
+    // 进入/退出快速模式（主窗口据此在状态栏提示一句，否则用户会以为"高亮坏了"）
+    void fastModeChanged(bool fast);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -155,6 +179,8 @@ private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect &rect, int dy);
     void refreshCurrentLine();
+    // 文档长度变了：决定要不要进/出快速模式（用字符数是 O(1)，不碰真正的文本）
+    void refreshFastMode();
 
 private:
     // 行号栏。定义在 .cpp 里：C++11 起**嵌套类拥有和成员一样的访问权限**，
@@ -175,6 +201,12 @@ private:
     MarkdownHighlighter *m_highlight = nullptr;
 
     int m_indentWidth = 4;
+
+    // 大文档快速模式：true = 已经关掉语法高亮（见 kFastModeThresholdChars）
+    bool m_fastMode = false;
+    // 高亮的"用户意图"：即使处于快速模式，这个值也记着用户的开关状态，
+    // 退出快速模式时能恢复成他原来要的样子。
+    bool m_highlightingWanted = true;
 
     // 主题配色（默认亮色；切换由 ThemeManager 通过 setThemePalette() 推进来）
     ThemePalette m_themePalette;

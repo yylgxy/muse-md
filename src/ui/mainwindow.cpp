@@ -24,6 +24,7 @@
 #include <QDockWidget>  // 文件树/搜索面板是停靠窗口：要调 setFeatures 得用它
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -41,6 +42,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTimer>  // 启动第二阶段：QTimer::singleShot(0, ...)
 #include <QToolBar>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -104,9 +106,29 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     // 主窗口接受拖放：把 .md 从资源管理器拖进来就能打开（实现在 dragEnterEvent/dropEvent）
     setAcceptDrops(true);
 
-    // ---- 窗口记忆（6.2）----
-    // 放在最后：上面的接线都做好了，恢复会话时不管关掉/新建标签都不会踩到半成品状态。
+    // ---- 启动：先让窗口显示，再把非核心的活排到下一轮（7.2 启动优化）----
+    // 恢复会话要读盘（可能好几个文件）、文件树要开始监听一个目录，
+    // 这些都不该挡在"窗口出现"前面。用 0 毫秒的单次定时器把它们排到事件循环的下一轮：
+    // 用户先看到界面，然后再看到文件一个个出现。耗时会在日志里报出来（便于对比优化前后）。
+    QTimer::singleShot(0, this, &MainWindow::finishStartup);
+}
+
+// 启动的第二阶段：窗口已经显示出来之后的"非核心"工作。
+void MainWindow::finishStartup()
+{
+    QElapsedTimer timer;
+    timer.start();
+
+    // 文件树从这里开始监听目录。放在这里而不是构造函数里：大目录的首次列目录
+    // 是有真实开销的（QFileSystemModel 要起监听线程并读一遍目录），
+    // 它不该拖慢"窗口出现"。
+    ui->fileTree->setRootPath(QDir::currentPath());
+    syncSearchDirectoryToSidebar();
+
+    // 恢复上次的会话（打开那些文件是这里最费时的一步）
     restoreSession();
+
+    LOG_INFO("启动：非核心部分完成（文件树 + 会话恢复），耗时 %1 ms", timer.elapsed());
 }
 
 MainWindow::~MainWindow()
@@ -168,7 +190,9 @@ void MainWindow::initUi()
     // 三种显示模式切来切去都不影响它。
     ui->fileTreeDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable
                                   | QDockWidget::DockWidgetFloatable);
-    ui->fileTree->setRootPath(QDir::currentPath());  // 没选过目录时从工作目录开始
+    // 注意：文件树的根目录**不在这里设**。设根目录会让 QFileSystemModel 立刻开始
+    // 监听那个目录（大目录首次列目录是有开销的），所以它被排到了 finishStartup() ——
+    // 那是"窗口已经显示出来之后"的第二阶段（7.2 启动优化）。
 
     // 中央分屏现在是"编辑器 + 预览"两块，初始各占一半
     ui->workbench->setSplitSizes({600, 600});
@@ -627,6 +651,18 @@ void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
     // 编辑器右键菜单里的两项：对话框/语言列表都在主窗口这边，编辑器只发"用户要这个"
     connect(editor, &EditorWidget::findRequested, this, &MainWindow::onFind);
     connect(editor, &EditorWidget::insertCodeBlockRequested, this, &MainWindow::onInsertCodeBlock);
+
+    // 大文档快速模式（7.2）：进了就明确说一句，否则用户会以为"语法高亮坏了"。
+    // 只说给当前标签听 —— 后台标签变大不该刷当前的状态栏。
+    connect(editor, &EditorWidget::fastModeChanged, this, [this, editor](bool fast) {
+        if (editor != currentEditor()) {
+            return;
+        }
+        statusBar()->showMessage(fast ? QStringLiteral("文档很大（超过 %1 字符）：已关闭语法高亮、暂停预览，保证编辑流畅")
+                                            .arg(EditorWidget::kFastModeThresholdChars)
+                                      : QStringLiteral("文档变小了：语法高亮与预览已恢复"),
+                                 10000);
+    });
 
     connect(files, &FileManager::fileOpened, this, [this, files](const QString &path) {
         onFileOpened(files, path);

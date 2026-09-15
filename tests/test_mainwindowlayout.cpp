@@ -538,6 +538,62 @@ int main(int argc, char *argv[])
               missingCalls.join(QStringLiteral(", ")));
     }
 
+    // ============================ J. 性能优化的接线（7.2）============================
+    {
+        std::printf("---- J. 性能优化 ----\n");
+
+        // 启动优化：构造函数只做"让窗口能出现"的事，非核心部分（文件树开始监听目录、
+        // 恢复上次会话）排到事件循环的下一轮
+        check(cpp.contains(QStringLiteral("QTimer::singleShot(0, this, &MainWindow::finishStartup)")),
+              QStringLiteral("启动: 非核心部分用 0ms 定时器排到 show 之后"));
+        check(cpp.contains(QStringLiteral("void MainWindow::finishStartup()")),
+              QStringLiteral("启动: finishStartup() 有实现"));
+        check(cpp.contains(QStringLiteral("启动：非核心部分完成")),
+              QStringLiteral("启动: 耗时写进了日志（便于对比优化前后）"));
+
+        // 文件树设根目录（会让 QFileSystemModel 开始监听目录）必须**在 finishStartup 里**、
+        // 而不是在 initUi 里 —— 也就是"不该挡在窗口出现之前"。
+        // 做法：把两个函数的函数体抠出来看（用列 0 的那个右花括号当结尾）。
+        {
+            const auto bodyOf = [&cpp](const QString &signature) {
+                const int start = cpp.indexOf(signature);
+                if (start < 0) {
+                    return QString();
+                }
+                const int end = cpp.indexOf(QStringLiteral("\n}\n"), start);
+                return cpp.mid(start, (end < 0 ? cpp.size() : end) - start);
+            };
+
+            const QString startupBody = bodyOf(QStringLiteral("void MainWindow::finishStartup()"));
+            const QString initUiBody = bodyOf(QStringLiteral("void MainWindow::initUi()"));
+            check(startupBody.contains(QStringLiteral("ui->fileTree->setRootPath")),
+                  QStringLiteral("启动: 文件树的根目录在 finishStartup() 里设"));
+            check(!initUiBody.contains(QStringLiteral("ui->fileTree->setRootPath")),
+                  QStringLiteral("启动: 构造函数那条路径上不再设根目录（不挡窗口显示）"));
+            check(startupBody.contains(QStringLiteral("restoreSession()")),
+                  QStringLiteral("启动: 会话恢复也在 finishStartup() 里（它要读盘）"));
+        }
+
+        // 大文档快速模式：状态栏要提示，否则用户以为"高亮坏了"
+        check(cpp.contains(QStringLiteral("&EditorWidget::fastModeChanged")),
+              QStringLiteral("大文档: 主窗口接了快速模式信号"));
+        check(cpp.contains(QStringLiteral("已关闭语法高亮、暂停预览")),
+              QStringLiteral("大文档: 状态栏会说清楚发生了什么"));
+
+        // 预览推送的推迟：由工作台负责（编辑器/工作台的测试里验证行为）
+        const QString workbenchPath = root + QStringLiteral("/src/business/editorworkbench.cpp");
+        const QString workbench = readFile(workbenchPath);
+        check(workbench.contains(QStringLiteral("bool EditorWorkbench::shouldDeferContent() const")),
+              QStringLiteral("推迟: 工作台里有「该不该推迟」的判断（预览隐藏 / 大文档）"));
+        check(workbench.contains(QStringLiteral("pushDeferredContent();")),
+              QStringLiteral("推迟: 并且在合适的时机补推（切回分屏、换编辑器、退出快速模式）"));
+
+        // 内存：缓存归属（这条是"代码结构"层面的保证，行为在 test_filemanager 里验证）
+        check(readFile(root + QStringLiteral("/src/core/storage/filemanager.h"))
+                  .contains(QStringLiteral("CacheManager m_cache;")),
+              QStringLiteral("内存: 缓存是 FileManager 的值成员（销毁文档即释放缓存）"));
+    }
+
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

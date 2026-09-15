@@ -80,7 +80,15 @@ public:
     // 把内容推给预览。baseDir 是文档所在目录（相对路径图片的基准）；
     // forceReload = true 表示"文档目录换了，必须重新加载模板"。
     // 不换目录时只推内容：页面不重载，所以切标签/切文档不会闪一下白屏。
+    //
+    // ★ 两种情况下会**先记下、先不推**（7.2 性能优化），等条件解除时立刻补推一次：
+    //   1) 预览这一侧被隐藏了（仅编辑模式）—— 推了也没人看，白花钱；
+    //   2) 当前编辑器处于大文档快速模式 —— 几十万字符的渲染会明显拖慢打字。
+    //   都只是"推迟"，不会丢内容（有没有欠着的可以用 hasDeferredContent() 问）。
     void showContent(const QString &markdown, const QString &baseDir = QString(), bool forceReload = false);
+
+    // 有没有"欠着还没推"的内容（主要给测试用，界面不需要关心）
+    bool hasDeferredContent() const;
 
     QString previewBaseDir() const;
 
@@ -96,6 +104,11 @@ private:
     void restoreSplitSizes();      // 切回分屏时恢复比例
     void syncScrollToPreview();    // 编辑器滚动 → 预览滚动
 
+    // 现在要不要"先记下不推送"（见 showContent 的说明）
+    bool shouldDeferContent() const;
+    // 把欠着的那次内容推送补上（切回分屏、或换了编辑器时调用）
+    void pushDeferredContent();
+
     QWidget *m_editorSide = nullptr;
     QWidget *m_previewSide = nullptr;
     QWebEngineView *m_previewView = nullptr;
@@ -107,6 +120,12 @@ private:
     ViewMode m_mode = ViewMode::Split;
     QList<int> m_savedSizes;               // 单栏模式下暂存的分屏比例
     QString m_previewBaseDir;              // 当前预览用的 baseUrl 目录
+
+    // 被推迟的那次内容推送（只有 m_hasPendingContent 为真时才有意义）
+    bool m_hasPendingContent = false;
+    QString m_pendingMarkdown;
+    QString m_pendingBaseDir;
+    bool m_pendingForceReload = false;
 };
 
 #endif // EDITORWORKBENCH_H

@@ -97,6 +97,8 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     connect(this, &QPlainTextEdit::blockCountChanged, this, &EditorWidget::updateLineNumberAreaWidth);
     connect(this, &QPlainTextEdit::updateRequest, this, &EditorWidget::updateLineNumberArea);
     connect(this, &QPlainTextEdit::cursorPositionChanged, this, &EditorWidget::refreshCurrentLine);
+    // 文档长度变了 → 判断要不要进/出"大文档快速模式"（7.2）
+    connect(this, &QPlainTextEdit::textChanged, this, &EditorWidget::refreshFastMode);
 
     updateLineNumberAreaWidth(0);
     refreshCurrentLine();
@@ -162,6 +164,75 @@ void EditorWidget::setThemePalette(const ThemePalette &palette)
 markdown_editor::core::document::ThemePalette EditorWidget::themePalette() const
 {
     return m_themePalette;
+}
+
+// ============================================================================
+// 大文档快速模式（7.2 性能）
+// ============================================================================
+
+bool EditorWidget::prefersFastMode(int characterCount, bool currentlyFast)
+{
+    if (characterCount > kFastModeThresholdChars) {
+        return true;
+    }
+    // 迟滞：已经在快速模式里的话，要降到阈值的 90% 以下才退出。
+    // 没有这一步，文档正好卡在阈值附近时每敲一个字都会切换一次高亮开关（又卡又闪）。
+    if (currentlyFast) {
+        return characterCount > kFastModeThresholdChars * 9 / 10;
+    }
+    return false;
+}
+
+bool EditorWidget::isFastMode() const
+{
+    return m_fastMode;
+}
+
+void EditorWidget::setHighlightingEnabled(bool enabled)
+{
+    m_highlightingWanted = enabled;
+    if (m_highlight == nullptr) {
+        return;
+    }
+
+    // 关掉高亮有两条路：把高亮器从文档上摘下来（setDocument(nullptr)），
+    // 或者让它不再重新高亮。摘下来最彻底 —— 它连"文档变了"的信号都收不到了。
+    if (enabled && !m_fastMode) {
+        m_highlight->setDocument(document());
+        m_highlight->rehighlight();
+    } else {
+        m_highlight->setDocument(nullptr);
+    }
+}
+
+bool EditorWidget::isHighlightingEnabled() const
+{
+    return m_highlightingWanted && !m_fastMode && m_highlight != nullptr && m_highlight->document() != nullptr;
+}
+
+void EditorWidget::refreshFastMode()
+{
+    // 用 characterCount() 而不是 toPlainText().size()：前者是 O(1)，
+    // 后者会把整篇文档复制一遍（在大文档上正好是最不该做的事）。
+    const int characters = document()->characterCount();
+    const bool fast = prefersFastMode(characters, m_fastMode);
+    if (fast == m_fastMode) {
+        return;  // 状态没变：不做任何事（避免多余的重绘/重排）
+    }
+
+    m_fastMode = fast;
+
+    // 进快速模式 → 摘掉高亮器；出去 → 按用户的意图恢复
+    if (m_highlight != nullptr) {
+        if (fast) {
+            m_highlight->setDocument(nullptr);
+        } else if (m_highlightingWanted) {
+            m_highlight->setDocument(document());
+            m_highlight->rehighlight();
+        }
+    }
+
+    emit fastModeChanged(fast);
 }
 
 // ============================================================================

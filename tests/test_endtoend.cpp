@@ -478,6 +478,59 @@ int main(int argc, char *argv[])
     }
 
     // ==================================================================
+    // 7.2 性能：一个 1MB 量级的大文档也要能正常编辑/保存/打开
+    // ==================================================================
+    {
+        std::printf("---- 7.2 大文档（1MB 量级）----\n");
+
+        // 造一份"1MB 量级"的 Markdown（用重复的小节拼出来，比一整行更像真实笔记）
+        QString big;
+        big.reserve(EditorWidget::kFastModeThresholdChars + 4096);
+        while (big.size() < EditorWidget::kFastModeThresholdChars + 500) {
+            big += QStringLiteral("# 小节\n\n- 一项\n- 另一项\n\n正文 **粗体** `代码`\n\n");
+        }
+
+        FileManager bigFiles;
+        bigFiles.setText(big);
+
+        const QString bigPath = work + QStringLiteral("/大文档.md");
+        QString error;
+        const bool saved = bigFiles.saveFileAs(bigPath, &error);
+        check(saved, QStringLiteral("7.2 大文档: 能保存"), error);
+        check(!bigFiles.isModified(), QStringLiteral("7.2 大文档: 保存后不再是已修改"));
+        check(QFileInfo(bigPath).size() > 300000,
+              QStringLiteral("7.2 大文档: 磁盘上的文件确实很大"),
+              QStringLiteral("%1 字节").arg(QFileInfo(bigPath).size()));
+
+        FileManager reopened;
+        check(reopened.openFile(bigPath, &error), QStringLiteral("7.2 大文档: 能重新打开"), error);
+        check(reopened.text().size() == big.size(), QStringLiteral("7.2 大文档: 内容长度一致"),
+              QStringLiteral("%1 字符").arg(reopened.text().size()));
+
+        // 编辑器侧：进大文档快速模式（关掉高亮），保证打字不卡
+        EditorWidget editor;
+        editor.setPlainText(reopened.text());
+        check(editor.isFastMode(), QStringLiteral("7.2 大文档: 编辑器自动进入快速模式"));
+        check(!editor.isHighlightingEnabled(), QStringLiteral("7.2 大文档: 语法高亮已关闭（打字的流畅由它保证）"));
+
+        // 预览侧：这么大的内容不该硬推（渲染管线里已经有了上限，这里验证工作台的推迟）
+        EditorWorkbench workbench;
+        auto *tabs = new TabManager();
+        auto *previewSide = new QWidget();
+        workbench.setup(tabs, previewSide);
+        EditorWidget *tabEditor = tabs->addEditorTab();
+        workbench.setCurrentEditor(tabEditor);
+        tabEditor->setPlainText(reopened.text());
+        workbench.showContent(reopened.text(), work, true);
+        check(workbench.hasDeferredContent(),
+              QStringLiteral("7.2 大文档: 预览推送被推迟（几十万字符的渲染会拖慢打字）"));
+        delete tabs;
+        delete previewSide;
+
+        QFile::remove(bigPath);  // 别让后面的搜索索引把它算进去
+    }
+
+    // ==================================================================
     std::printf("\n---- 需要人工确认的项（受控环境里 Chromium 起不来）----\n");
     manual(QStringLiteral("预览区显示、滚动同步、点击预览跳源码"));
     manual(QStringLiteral("PDF 导出的内容与排版"));

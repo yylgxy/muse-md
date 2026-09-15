@@ -149,6 +149,11 @@ void EditorWorkbench::setViewMode(ViewMode mode)
         restoreSplitSizes();
     }
 
+    // 切回"看得到预览"的模式：如果之前有大文档/隐藏期间欠下的内容，补推一次（7.2）
+    if (mode != ViewMode::EditorOnly) {
+        pushDeferredContent();
+    }
+
     emit viewModeChanged(mode);
 }
 
@@ -211,14 +216,20 @@ void EditorWorkbench::setCurrentEditor(EditorWidget *editor)
     // 断开上一个编辑器：不然后台标签滚动也会把预览带走
     if (m_editor != nullptr) {
         disconnect(m_editor->verticalScrollBar(), nullptr, this, nullptr);
+        disconnect(m_editor, &EditorWidget::fastModeChanged, this, nullptr);
     }
 
     m_editor = editor;
 
     if (m_editor != nullptr) {
         connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, &EditorWorkbench::syncScrollToPreview);
+        // 这个编辑器进出"大文档快速模式"时，预览的推送要跟着恢复/暂停（7.2）
+        connect(m_editor, &EditorWidget::fastModeChanged, this, [this](bool) { pushDeferredContent(); });
         syncScrollToPreview();  // 刚切过来先对齐一次，不然预览还停在上一个文档的位置
     }
+
+    // 换了编辑器：新文档可能不是大文档 —— 把之前欠下的内容补推一次（7.2）
+    pushDeferredContent();
 }
 
 EditorWidget *EditorWorkbench::currentEditor() const
@@ -241,6 +252,16 @@ void EditorWorkbench::syncScrollToPreview()
 
 void EditorWorkbench::showContent(const QString &markdown, const QString &baseDir, bool forceReload)
 {
+    // 先看看这次该不该推迟（预览不可见 / 大文档快速模式）—— 见头文件里的说明
+    if (shouldDeferContent()) {
+        m_hasPendingContent = true;
+        m_pendingMarkdown = markdown;
+        m_pendingBaseDir = baseDir;
+        m_pendingForceReload = forceReload;
+        return;
+    }
+    m_hasPendingContent = false;
+
     const bool dirChanged = (baseDir != m_previewBaseDir);
 
     if (forceReload || dirChanged) {
@@ -257,6 +278,51 @@ void EditorWorkbench::showContent(const QString &markdown, const QString &baseDi
     // 只是换了个标签/文档但目录没变：只推内容，页面不重载。
     // 重载页面会闪一下白屏、还会让 WebChannel 重连，切标签时手感很差。
     m_renderer->updateContentNow(markdown);
+}
+
+bool EditorWorkbench::hasDeferredContent() const
+{
+    return m_hasPendingContent;
+}
+
+bool EditorWorkbench::shouldDeferContent() const
+{
+    // 情况 1：预览这一侧被明确隐藏了（仅编辑模式）。
+    // 用 isHidden() 而不是 isVisible()：窗口还没显示出来时 isVisible() 也是 false，
+    // 那会让启动阶段的内容推送全部被推迟（而且没人会去补推）。
+    if (m_previewSide != nullptr && m_previewSide->isHidden()) {
+        return true;
+    }
+
+    // 情况 2：当前编辑器是大文档（快速模式）—— 预览渲染同样很贵
+    if (m_editor != nullptr && m_editor->isFastMode()) {
+        return true;
+    }
+
+    return false;
+}
+
+void EditorWorkbench::pushDeferredContent()
+{
+    if (!m_hasPendingContent) {
+        return;
+    }
+
+    // 条件可能还没解除（比如用户又切回"仅编辑"）：那就继续欠着
+    if (shouldDeferContent()) {
+        return;
+    }
+
+    const QString markdown = m_pendingMarkdown;
+    const QString baseDir = m_pendingBaseDir;
+    const bool forceReload = m_pendingForceReload;
+
+    m_hasPendingContent = false;
+    m_pendingMarkdown.clear();
+    m_pendingBaseDir.clear();
+    m_pendingForceReload = false;
+
+    showContent(markdown, baseDir, forceReload);  // 这时候不会再被推迟了
 }
 
 QString EditorWorkbench::previewBaseDir() const

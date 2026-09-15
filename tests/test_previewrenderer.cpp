@@ -308,6 +308,27 @@ int main(int argc, char *argv[])
         check(!renderer.hasPendingUpdate(), QStringLiteral("自愈: 崩溃之后渲染器还能继续接内容"));
     }
 
+    // ============================ 7.2 防抖就是 300ms ============================
+    {
+        PreviewRenderer renderer;
+        check(PreviewRenderer::kDefaultDebounceMs == 300,
+              QStringLiteral("防抖: 默认就是 300ms（规格要求「停止输入 300ms 再渲染」）"),
+              QStringLiteral("%1 ms").arg(PreviewRenderer::kDefaultDebounceMs));
+        check(renderer.debounceInterval() == 300, QStringLiteral("防抖: 新建的渲染器用的就是这个值"),
+              QStringLiteral("%1 ms").arg(renderer.debounceInterval()));
+
+        // "打字不卡顿"的本质：连打十次，只有最后一次到期才真正渲染一次
+        renderer.setDebounceInterval(120);
+        for (int i = 0; i < 10; ++i) {
+            renderer.updateContent(QStringLiteral("第 %1 次输入").arg(i));
+            spin(20);  // 每次间隔都短于防抖窗口
+        }
+        check(renderer.hasPendingUpdate(),
+              QStringLiteral("防抖: 连续敲十个字，一次都没提前渲染（都还在等）"));
+        spin(150);
+        check(!renderer.hasPendingUpdate(), QStringLiteral("防抖: 停手之后才渲染一次"));
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== PreviewRenderer 契约测试：全部通过 ===\n");
     } else {

@@ -636,6 +636,80 @@ int main(int argc, char *argv[])
         delete blankMenu;
     }
 
+    // ============================ M. 大文档快速模式（7.2 性能）============================
+    {
+        std::printf("---- M. 大文档快速模式 ----\n");
+
+        // ---- 纯规则 ----
+        const int threshold = EditorWidget::kFastModeThresholdChars;
+        check(threshold >= 100000, QStringLiteral("快速模式: 阈值是「大文档」量级（不是几万字符就触发）"),
+              QString::number(threshold));
+        check(!EditorWidget::prefersFastMode(0), QStringLiteral("快速模式: 空文档不触发"));
+        check(!EditorWidget::prefersFastMode(threshold), QStringLiteral("快速模式: 正好等于阈值不触发"));
+        check(EditorWidget::prefersFastMode(threshold + 1), QStringLiteral("快速模式: 超过阈值就触发"));
+
+        // 迟滞：已经在快速模式下时，要降到阈值的 90% 以下才退出 ——
+        // 没有这一步，文档卡在阈值附近会每敲一个字就切换一次高亮开关
+        check(EditorWidget::prefersFastMode(threshold - 1, true),
+              QStringLiteral("快速模式: 已在快速模式时，略低于阈值仍保持（迟滞）"));
+        check(EditorWidget::prefersFastMode(threshold * 95 / 100, true),
+              QStringLiteral("快速模式: 95% 仍保持在快速模式"));
+        check(!EditorWidget::prefersFastMode(threshold * 85 / 100, true),
+              QStringLiteral("快速模式: 降到 85%（低于 90% 的门槛）才退出"));
+        check(!EditorWidget::prefersFastMode(threshold * 85 / 100, false),
+              QStringLiteral("快速模式: 没进过快速模式时，85% 当然不触发"));
+
+        // ---- 真控件上的行为 ----
+        EditorWidget editor;
+        check(!editor.isFastMode() && editor.isHighlightingEnabled(),
+              QStringLiteral("快速模式: 普通文档本来是「开着高亮」的"),
+              QStringLiteral("fast=%1 highlight=%2").arg(editor.isFastMode()).arg(editor.isHighlightingEnabled()));
+
+        int modeSignals = 0;
+        bool lastFast = false;
+        QObject::connect(&editor, &EditorWidget::fastModeChanged, [&](bool fast) {
+            ++modeSignals;
+            lastFast = fast;
+        });
+
+        // 造一个"1MB 量级"的文档（用重复行拼出来，比一整行更像真实笔记）
+        QString big;
+        big.reserve(threshold + 1000);
+        while (big.size() < threshold + 100) {
+            big += QStringLiteral("# 标题\n\n- 一项\n- 另一项\n\n正文 **粗体** 与 `代码`\n\n");
+        }
+        editor.setPlainText(big);
+
+        check(editor.isFastMode(), QStringLiteral("快速模式: 打开大文档后自动进入"),
+              QStringLiteral("%1 字符").arg(big.size()));
+        check(modeSignals >= 1 && lastFast, QStringLiteral("快速模式: 发了 fastModeChanged(true)（界面据此提示）"),
+              QStringLiteral("signals=%1").arg(modeSignals));
+        check(!editor.isHighlightingEnabled(), QStringLiteral("快速模式: 语法高亮被关掉了（大文件里最贵的就是它）"));
+        check(editor.highlighter() != nullptr && editor.highlighter()->document() == nullptr,
+              QStringLiteral("快速模式: 高亮器被从文档上摘下来了（连文档变化信号都收不到）"));
+
+        // 行号栏这类廉价功能要留着（关掉它反而不好用）
+        check(editor.lineNumberAreaWidth() > 0, QStringLiteral("快速模式: 行号栏还在（那是廉价功能）"));
+
+        // 文档变小 → 退出快速模式，高亮回来
+        editor.setPlainText(QStringLiteral("# 小的\n\n正常笔记\n"));
+        check(!editor.isFastMode(), QStringLiteral("快速模式: 文档变小后自动退出"));
+        check(editor.isHighlightingEnabled(), QStringLiteral("快速模式: 退出后语法高亮恢复"));
+        check(editor.highlighter()->document() == editor.document(),
+              QStringLiteral("快速模式: 高亮器重新挂回文档上"));
+        check(lastFast == false, QStringLiteral("快速模式: 也发了 fastModeChanged(false)"));
+
+        // 用户手动关掉高亮时，快速模式进出都不该把它打开（尊重用户意图）
+        EditorWidget manual;
+        manual.setHighlightingEnabled(false);
+        check(!manual.isHighlightingEnabled(), QStringLiteral("手动: setHighlightingEnabled(false) 生效"));
+        manual.setPlainText(QStringLiteral("# 小文档\n"));
+        check(!manual.isHighlightingEnabled(),
+              QStringLiteral("手动: 即使是小文档也不擅自打开（用户的意图优先）"));
+        manual.setHighlightingEnabled(true);
+        check(manual.isHighlightingEnabled(), QStringLiteral("手动: 再打开也能恢复"));
+    }
+
     // ============================ L. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;

@@ -297,6 +297,62 @@ int main(int argc, char *argv[])
         delete previewSide;
     }
 
+    // ============================ F. 大文档/隐藏时的推送推迟（7.2 性能）============================
+    {
+        std::printf("---- F. 内容推送的推迟 ----\n");
+
+        EditorWorkbench workbench;
+        auto *tabs = new TabManager();
+        auto *previewSide = new QWidget();
+        workbench.setup(tabs, previewSide);
+
+        EditorWidget *editor = tabs->addEditorTab();
+        workbench.setCurrentEditor(editor);
+        workbench.resize(900, 600);
+        workbench.show();
+        QCoreApplication::processEvents();
+
+        // ---- 情况 1：仅编辑模式下不该往预览推 ----
+        workbench.setViewMode(EditorWorkbench::ViewMode::EditorOnly);
+        check(previewSide->isHidden(), QStringLiteral("推迟: 仅编辑模式下预览确实被隐藏了"));
+
+        workbench.renderer()->flush();
+        workbench.showContent(QStringLiteral("# 一边打字一边推是白花钱"), QStringLiteral("D:/n"));
+        check(workbench.hasDeferredContent(), QStringLiteral("推迟: 预览不可见时内容被记下来（欠着）"));
+        check(!workbench.renderer()->hasPendingUpdate(),
+              QStringLiteral("推迟: 而且没有排进渲染管线（省掉的就是这笔工作）"));
+
+        // 切回分屏 → 立刻补推
+        workbench.setViewMode(EditorWorkbench::ViewMode::Split);
+        check(!workbench.hasDeferredContent(), QStringLiteral("推迟: 切回分屏后欠的内容补推掉了"));
+        check(workbench.renderer()->hasPendingUpdate() || workbench.renderer()->isPageReady(),
+              QStringLiteral("推迟: 补推确实进了渲染管线"));
+
+        // ---- 情况 2：大文档快速模式 ----
+        QString big;
+        big.reserve(EditorWidget::kFastModeThresholdChars + 1000);
+        while (big.size() < EditorWidget::kFastModeThresholdChars + 100) {
+            big += QStringLiteral("# 标题\n\n正文\n\n");
+        }
+        editor->setPlainText(big);
+        check(editor->isFastMode(), QStringLiteral("推迟: 编辑器进入了大文档快速模式"));
+
+        workbench.renderer()->flush();
+        workbench.showContent(QStringLiteral("# 大文档不该反复渲染"), QStringLiteral("D:/n"));
+        check(workbench.hasDeferredContent(), QStringLiteral("推迟: 大文档时内容也先欠着（不拖慢打字）"));
+        check(!workbench.renderer()->hasPendingUpdate(), QStringLiteral("推迟: 同样没有排进渲染管线"));
+
+        // 文档变小 → 编辑器退出快速模式 → 工作台自动补推（它连了 fastModeChanged）
+        editor->setPlainText(QStringLiteral("# 小文档\n"));
+        check(!editor->isFastMode(), QStringLiteral("推迟: 文档变小后退出快速模式"));
+        check(!workbench.hasDeferredContent(),
+              QStringLiteral("推迟: 退出快速模式后自动补推（不需要用户切一下模式）"));
+
+        workbench.hide();
+        delete tabs;
+        delete previewSide;
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== EditorWorkbench 契约测试：全部通过 ===\n");
     } else {

@@ -375,6 +375,34 @@ int main(int argc, char *argv[])
               QStringLiteral("binary 反例: GBK 内容正确"), files.text());
     }
 
+    // ============================ 3d. 内存：缓存的归属与上限（7.2）============================
+    // "关闭文件释放缓存"在这个项目里靠的是**归属设计**：CacheManager 是 FileManager 的
+    // 值成员，一个文档一个缓存 —— 标签一关、FileManager 一销毁，缓存跟着消失，
+    // 不存在"关掉的文档还占着内存"。这里把这条钉住。
+    {
+        const QString cacheDoc = work + QStringLiteral("/cache-owner.md");
+        FileUtils::writeFileBytes(cacheDoc, QStringLiteral("缓存归属测试\n").toUtf8());
+
+        {
+            FileManager session;
+            QString err;
+            check(session.openFile(cacheDoc, &err), QStringLiteral("缓存: 打开一个文件"), err);
+            check(session.cacheManager()->size() > 0,
+                  QStringLiteral("缓存: 打开之后这份内容进了缓存"),
+                  QStringLiteral("%1 条").arg(session.cacheManager()->size()));
+            check(session.cacheManager()->maxEntries() > 0,
+                  QStringLiteral("缓存: 有条数上限（不会无限增长）"),
+                  QStringLiteral("上限 %1 条").arg(session.cacheManager()->maxEntries()));
+        }
+
+        // 上面那个 FileManager 已经销毁（等价于标签被关掉）：新的必须是"干净"的
+        FileManager fresh;
+        check(fresh.cacheManager()->size() == 0,
+              QStringLiteral("缓存: 上一个文档销毁后，新的从空缓存开始（不跨文档累积）"));
+        check(fresh.cacheManager()->hits() == 0 && fresh.cacheManager()->misses() == 0,
+              QStringLiteral("缓存: 命中等统计也是新的（每个文档各算各的）"));
+    }
+
     // ============================ 4. 只读文件 ============================
     {
         const QString pathRo = work + QStringLiteral("/readonly.md");
