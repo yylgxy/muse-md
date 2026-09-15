@@ -122,20 +122,37 @@ public:
 
     // 导出 HTML（同步）。成功：true；失败：false + *error（可直接展示）。
     // 目标目录不存在会自动建（用户手打一个不存在的路径是很常见的事）。
+    //
+    // ★ options **故意不给默认值**（虽然那样写更顺手）：
+    //   HtmlOptions 是本类的嵌套结构体，而"嵌套类型的默认成员初始化器"不能出现在
+    //   外层类的默认参数位置上 —— 这是标准的规定。MSVC 会放过它，但 clang
+    //   （Qt Creator 的代码分析就是 clang）会报：
+    //     default member initializer for 'inlineImages' needed within definition of
+    //     enclosing class 'Exporter' outside of member functions
+    //   而且这条错误会被报到包含链的最顶层（main.cpp 的 #include 那一行），非常难查。
+    //   想省事就用下面那个不带 options 的重载：它把 HtmlOptions() 放在**函数体**里，
+    //   那个位置完全合法。
     bool exportHtml(const QString &markdown,
                     const QString &baseDir,
                     const QString &targetPath,
-                    const HtmlOptions &options = HtmlOptions(),
+                    const HtmlOptions &options,
                     HtmlResult *result = nullptr,
                     QString *error = nullptr);
 
+    // 便捷重载：不关心选项时用它（等价于传一个默认的 HtmlOptions）
+    bool exportHtml(const QString &markdown, const QString &baseDir, const QString &targetPath, QString *error = nullptr);
+
     // 导出 PDF（**异步**）：立刻返回，结果通过 pdfExported() 回来。
     // 正在导出时再调一次会直接以失败信号回来（不会排队，也不会打出两个文件互相覆盖）。
+    // options 不给默认值的原因同上。
     void exportPdf(const QString &markdown,
                    const QString &baseDir,
                    const QString &targetPath,
-                   const PdfOptions &options = PdfOptions(),
+                   const PdfOptions &options,
                    const QString &title = QString());
+
+    // 便捷重载：用默认的 PDF 选项（A4 纵向、12mm 边距、跟随当前主题）
+    void exportPdf(const QString &markdown, const QString &baseDir, const QString &targetPath);
 
     bool isPdfRunning() const;
 

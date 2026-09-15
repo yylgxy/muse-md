@@ -334,7 +334,21 @@ bool Exporter::exportHtml(const QString &markdown,
     return true;
 }
 
+// 便捷重载：默认选项。
+// 定义写在 .cpp 里是有意的：HtmlOptions() 这个"默认成员初始化器"出现在**函数体**里
+// 完全合法，出现在外层类的**默认参数**位置才会被 clang 拒绝（见头文件里的说明）。
+bool Exporter::exportHtml(const QString &markdown, const QString &baseDir, const QString &targetPath, QString *error)
+{
+    return exportHtml(markdown, baseDir, targetPath, HtmlOptions(), nullptr, error);
+}
+
 // ============================ PDF 导出 ============================
+
+// 便捷重载：默认 PDF 选项（原因同 exportHtml 的那个重载）
+void Exporter::exportPdf(const QString &markdown, const QString &baseDir, const QString &targetPath)
+{
+    exportPdf(markdown, baseDir, targetPath, PdfOptions(), QString());
+}
 
 bool Exporter::isPdfRunning() const
 {

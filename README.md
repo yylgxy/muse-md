@@ -85,6 +85,22 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
+**改完代码顺手做一次 clang 检查（建议）**
+
+MSVC 对某些写法是宽容的，而 **Qt Creator 的代码分析用的是 clang** —— 会出现"编译能过、但编辑器里一片红"的情况。
+真实踩到过一次：嵌套结构体的默认成员初始化器被写成了外层类的默认参数，MSVC 放过、clang 按标准拒绝，
+而且错误被报在包含链最顶层（`main.cpp` 的 `#include` 那一行），看着完全摸不着头脑。
+
+Qt Creator 自带 clangd，可以直接拿它当检查器：
+
+```bash
+# 先准备一份 compile_commands.json（源码目录 + Qt 头文件目录 + 同样的宏），然后：
+"<Qt>/Tools/QtCreator/bin/clang/bin/clangd.exe" --check=src/app/main.cpp --compile-commands-dir=<cdb 所在目录>
+```
+
+真正的诊断会以 `文件:行:列: error: …` 的形式打出来；日志里 `tweak: … FAIL` 那类可以忽略
+（那是 clangd 内部尝试生成"提取函数"代码动作失败，与代码本身无关）。
+
 ## 代码结构
 
 ```
