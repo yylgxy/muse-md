@@ -303,15 +303,34 @@ add_executable(test_mainwindowlayout
     test_mainwindowlayout.cpp
 )
 target_link_libraries(test_mainwindowlayout
+    # 链接 ui 只是为了能调 MainWindow::droppedFiles()（拖拽规则住在 mainwindow.cpp 里）。
+    # 测试**不会**构造 MainWindow，所以不会拉起 Chromium。
+    ui
+    infrastructure
+    Qt6::Widgets
+    Qt6::Gui
     Qt6::Core
 )
 add_test(NAME mainwindowlayout COMMAND test_mainwindowlayout)
+
+# ---------------- SessionState 契约测试（6.2 窗口记忆）----------------
+# 只依赖 ConfigManager（键值配置），QCoreApplication 就够。
+# 配置指向临时文件，不碰用户真实的 config.ini。
+add_executable(test_sessionstate
+    test_sessionstate.cpp
+)
+target_link_libraries(test_sessionstate
+    business
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME sessionstate COMMAND test_sessionstate)
 
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout sessionstate PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

@@ -10,13 +10,17 @@
 #include "filemanager.h"        // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "findreplacedialog.h"  // 查找/替换对话框是窗口的一个成员（按值持有）
 #include "recentfiles.h"        // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
+#include "sessionstate.h"       // 6.2：窗口/会话记忆（静态工具类）
 #include "thememanager.h"       // 5.7：主题（槽签名里用它的枚举）
 
 class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
 class QActionGroup;
+class QDragEnterEvent;
+class QDropEvent;
 class QLabel;
 class QMenu;
+class QMimeData;
 
 // uic 会把 mainwindow.ui 编译成 ui_mainwindow.h，里面是 namespace Ui { class MainWindow; }，
 // 成员就是 .ui 里那些控件的指针（tabManager / preview / splitter / menubar / statusbar …）。
@@ -75,9 +79,24 @@ public:
     // 已经打开过的文件不会再开一个标签，而是直接切过去。
     bool openFile(const QString &path);
 
+    // ---- 拖拽打开的纯逻辑（不碰窗口，所以能单独测）----
+    // 从拖进来的数据里挑出"可以打开的文件"：只收本地文件、只要 .md/.markdown/.txt、
+    // 文件夹里的 .md 会被展开（拖一个目录进来也能用）。
+    static QStringList droppedFiles(const QMimeData *data);
+
 protected:
-    // 关窗口：每个有未保存修改的标签都问一遍（和关标签用的是同一个 maybeSave）
+    // 关窗口：每个有未保存修改的标签都问一遍（和关标签用的是同一个 maybeSave），
+    // 然后把窗口几何 + 这次打开的文件记进配置（下次启动恢复）
     void closeEvent(QCloseEvent *event) override;
+
+    // ---- 拖拽打开（6.2）----
+    // 把一个 .md 文件从资源管理器拖进窗口就能打开。只需要两步：
+    //   dragEnterEvent 决定"要不要接受"（不接受的话鼠标会显示禁止图标）
+    //   dropEvent      真正打开
+    // dragMoveEvent **故意不重写**：默认实现会沿用 dragEnterEvent 给出的答案，
+    // 而我们没有"拖到不同区域做不同事"的需求。
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private slots:
     void onNewFile();       // 多标签时代 = 新建一个标签
@@ -206,6 +225,14 @@ private:
     // 汇总成一个函数：这四样东西的刷新时机几乎一样（切标签/打字/保存/光标动），
     // 分散着更新迟早会漏一处。
     void updateDocumentStatus();
+
+    // ============================ 窗口记忆（6.2）============================
+    // 启动时恢复：窗口几何 + 上次打开的文件（磁盘上没了的跳过）+ 面板可见性
+    void restoreSession();
+    // 退出前保存（几何 + 当前打开的文件 + 当前索引 + 面板可见性）
+    void saveSession() const;
+    // 把当前所有标签里"有磁盘路径"的那些收集起来（顺序 = 标签顺序）
+    QStringList openFilePaths() const;
 
     Ui::MainWindow *ui = nullptr;
 

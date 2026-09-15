@@ -3,7 +3,9 @@
 #include "markdownhighlighter.h"
 
 #include <QFontMetrics>
+#include <QContextMenuEvent>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QRegularExpression>
@@ -295,6 +297,34 @@ int EditorWidget::countOccurrences(const QString &text, bool caseSensitive) cons
         found = document()->find(text, found, flags);
     }
     return count;
+}
+
+// ============================================================================
+// 右键菜单
+// ============================================================================
+
+QMenu *EditorWidget::createContextMenu()
+{
+    // 基类的标准菜单：撤销/重做（不可用时自动置灰）、剪切/复制/粘贴/删除/全选。
+    // 这一份 Qt 已经替我们维护好了，自己重写一遍只会漏掉细节。
+    QMenu *menu = createStandardContextMenu();
+
+    menu->addSeparator();
+    QAction *findAction = menu->addAction(QStringLiteral("查找/替换…"));
+    connect(findAction, &QAction::triggered, this, &EditorWidget::findRequested);
+
+    menu->addSeparator();
+    QAction *codeAction = menu->addAction(QStringLiteral("插入代码块…"));
+    connect(codeAction, &QAction::triggered, this, &EditorWidget::insertCodeBlockRequested);
+
+    return menu;
+}
+
+void EditorWidget::contextMenuEvent(QContextMenuEvent *event)
+{
+    QMenu *menu = createContextMenu();
+    menu->exec(event->globalPos());
+    delete menu;  // 菜单是自己 new 的，用完要还回去
 }
 
 // ============================================================================

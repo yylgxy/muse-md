@@ -1,6 +1,7 @@
 #ifndef TABMANAGER_H
 #define TABMANAGER_H
 
+#include <QHash>
 #include <QString>
 #include <QStringList>
 #include <QTabWidget>
@@ -8,6 +9,9 @@
 #include <functional>
 
 class EditorWidget;  // 全局命名空间的类（和 MainWindow、MarkdownHighlighter 一致）
+class QMenu;
+class QPoint;
+class QTabBar;
 
 // 多标签页管理：一个标签 = 一个文档，页面就是 EditorWidget。
 //
@@ -65,6 +69,21 @@ public:
     // 中途用户取消时返回 false —— 已经关掉的不再恢复，这和常见编辑器的行为一致。
     bool requestCloseAllTabs();
 
+    // 关闭除 index 之外的其它标签 / 关闭 index 右侧的标签。
+    // 同样走"先问一声"的那条路（确认回调），所以不会绕过"未保存提示"。
+    bool requestCloseOtherTabs(int index);
+    bool requestCloseTabsToRight(int index);
+
+    // ============================ 右键菜单 ============================
+    // 造一份标签页右键菜单（调用方负责 delete）。公开出来是为了让"菜单里有哪些动作、
+    // 什么时候该禁用"也能被测到 —— 和 FileTreeView/EditorWidget 是同一个做法。
+    QMenu *createTabContextMenu(int index);
+
+    // 这个标签对应的文档路径（给"复制路径/在文件管理器中显示"用）；没有路径返回空。
+    QString tabFilePath(int index) const;
+    // 这个标签的显示名（不含修改标记）
+    QString tabFileName(int index) const;
+
     // 当前所有标签的标题，按显示顺序。用于会话恢复/调试。
     QStringList tabTitles() const;
 
@@ -79,9 +98,20 @@ signals:
 private slots:
     void onCloseRequested(int index);   // 标签上的 × 被点了
     void onCurrentChanged(int index);   // QTabWidget 自带信号 → 转成 currentEditorChanged
+    void onTabContextMenuRequested(const QPoint &pos);
 
 private:
+    // 每个标签除了显示文字，还记着"它的文档在磁盘上的哪个位置"：
+    // 右键菜单里的"复制路径 / 在文件管理器中显示"要用它。
+    // （QTabToolTip 里也有路径，但那是"顺便存"的，不该当数据来源。）
+    struct TabMeta
+    {
+        QString filePath;
+        QString fileName;
+    };
+
     CloseConfirmHandler m_closeConfirm;
+    QHash<const EditorWidget *, TabMeta> m_meta;  // 键是那个编辑器
 };
 
 #endif // TABMANAGER_H

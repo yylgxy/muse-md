@@ -12,9 +12,11 @@
 #include "markdownhighlighter.h"  // 要调用 highlighter()->rehighlight()，需要完整类型
 
 #include <QApplication>
+#include <QAction>
 #include <QImage>
 #include <QKeyEvent>
 #include <QList>
+#include <QMenu>
 #include <QPainter>
 #include <QPixmap>
 #include <QString>
@@ -577,7 +579,64 @@ int main(int argc, char *argv[])
         check(all.countOccurrences(QString()) == 0, QStringLiteral("统计: 空关键词 -> 0"));
     }
 
-    // ============================ K. 语法高亮器已绑定 ============================
+    // ============================ K. 右键菜单（6.2）============================
+    {
+        EditorWidget editor;
+        editor.setPlainText(QStringLiteral("一些内容"));
+
+        QMenu *menu = editor.createContextMenu();
+
+        // 注意：Qt 标准右键菜单里的动作文本**内嵌了快捷键文字和制表符**
+        //（实际形如 "&Copy\tCtrl+C"），所以这里必须用子串查找，不能精确相等。
+        const auto findAction = [](QMenu *m, const QString &needle) -> QAction * {
+            for (QAction *action : m->actions()) {
+                if (action->text().contains(needle)) {
+                    return action;
+                }
+            }
+            return nullptr;
+        };
+
+        QStringList texts;
+        for (QAction *action : menu->actions()) {
+            texts << (action->isSeparator() ? QStringLiteral("---") : action->text());
+        }
+
+        // 基类的标准项（撤销/重做/复制/粘贴…）必须还在 —— 自己拼菜单很容易漏掉它们
+        check(findAction(menu, QStringLiteral("Undo")) != nullptr,
+              QStringLiteral("右键菜单: 保留了基类的撤销项"), texts.join(QStringLiteral(" / ")));
+        check(findAction(menu, QStringLiteral("Copy")) != nullptr
+                  && findAction(menu, QStringLiteral("Paste")) != nullptr,
+              QStringLiteral("右键菜单: 保留了基类的复制/粘贴项"));
+        check(findAction(menu, QStringLiteral("查找/替换…")) != nullptr
+                  && findAction(menu, QStringLiteral("插入代码块…")) != nullptr,
+              QStringLiteral("右键菜单: 有我们自己的查找/替换与插入代码块"));
+
+        // 点"查找/替换"和"插入代码块"要发信号（对话框归主窗口管，编辑器不自己弹）
+        int findSignals = 0;
+        int codeSignals = 0;
+        QObject::connect(&editor, &EditorWidget::findRequested, [&findSignals] { ++findSignals; });
+        QObject::connect(&editor, &EditorWidget::insertCodeBlockRequested, [&codeSignals] { ++codeSignals; });
+
+        findAction(menu, QStringLiteral("查找/替换…"))->trigger();
+        findAction(menu, QStringLiteral("插入代码块…"))->trigger();
+        check(findSignals == 1, QStringLiteral("右键菜单: 点了查找 -> 发出 findRequested"),
+              QStringLiteral("%1 次").arg(findSignals));
+        check(codeSignals == 1, QStringLiteral("右键菜单: 点了插入代码块 -> 发出 insertCodeBlockRequested"),
+              QStringLiteral("%1 次").arg(codeSignals));
+        delete menu;
+
+        // 没选中内容时，标准菜单里的"复制"应该是禁用的（说明我们没把它接管成"永远可用"）
+        EditorWidget blank;
+        blank.setPlainText(QStringLiteral("abc"));
+        QMenu *blankMenu = blank.createContextMenu();
+        QAction *copyAction = findAction(blankMenu, QStringLiteral("Copy"));
+        check(copyAction != nullptr && !copyAction->isEnabled(),
+              QStringLiteral("右键菜单: 没选中内容时复制被禁用（基类的状态还在）"));
+        delete blankMenu;
+    }
+
+    // ============================ L. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;
         check(editor.highlighter() != nullptr, QStringLiteral("高亮: 控件自己绑定了高亮器"));

@@ -16,17 +16,25 @@
 //   代价是改了这些名字/文案就要顺手改测试 —— 这正是它有用的原因：
 //   它把"界面入口"变成了改代码时会立刻发现的东西，而不是等人肉发现少了个菜单。
 //
-// 只需要 QCoreApplication（纯读文件 + 字符串检查，不需要窗口）。
+// 需要 QCoreApplication（读文件 + 调 MainWindow 的纯静态函数；窗口本身不构造）。
+//
+// 注意：为了能调 MainWindow::droppedFiles()（拖拽的规则），这个测试链接了 ui 层。
+// 链接 ui 只是因为那个函数住在 mainwindow.cpp 里 —— 测试**不会**构造 MainWindow，
+// 所以不会拉起 Chromium。
 //
 // 跑法：ctest -C Debug --output-on-failure
+
+#include "mainwindow.h"  // 只为调它的纯静态函数 droppedFiles()
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMimeData>
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 
 #include <cstdio>
 
@@ -272,6 +280,113 @@ int main(int argc, char *argv[])
         check(cpp.contains(QStringLiteral("visibilityChanged, m_showFileTreeAction"))
                   && cpp.contains(QStringLiteral("visibilityChanged, m_searchAction")),
               QStringLiteral("接线: 面板被拖走/关掉时菜单勾选会自动同步"));
+    }
+
+    // ============================ E. 快捷键（6.2）============================
+    {
+        std::printf("---- E. 快捷键 ----\n");
+
+        // 快捷键是"看得见才记得住"的东西，所以一边设一边在结构上钉住。
+        // 前三组用 Qt 的标准键（QKeySequence::New 在 Windows 上就是 Ctrl+N）。
+        const QStringList standardKeys = {QStringLiteral("QKeySequence::New"), QStringLiteral("QKeySequence::Open"),
+                                          QStringLiteral("QKeySequence::Save"), QStringLiteral("QKeySequence::Undo"),
+                                          QStringLiteral("QKeySequence::Redo"), QStringLiteral("QKeySequence::Find")};
+        const QStringList missingKeys = missingPieces(cpp, standardKeys);
+        check(missingKeys.isEmpty(),
+              QStringLiteral("快捷键: 新建/打开/保存/撤销/重做/查找 都绑了标准键（Ctrl+N/O/S/Z/Y/F）"),
+              missingKeys.join(QStringLiteral(", ")));
+
+        // 重做额外认 Ctrl+Y（有些习惯是从别的编辑器带过来的）
+        check(cpp.contains(QStringLiteral("QKeySequence(Qt::CTRL | Qt::Key_Y)")),
+              QStringLiteral("快捷键: 重做额外绑了 Ctrl+Y"));
+
+        // 切换预览 = F11、切换主题 = Ctrl+Shift+T
+        check(cpp.contains(QStringLiteral("QKeySequence(Qt::Key_F11)")),
+              QStringLiteral("快捷键: 切换预览绑了 F11"));
+        check(cpp.contains(QStringLiteral("QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T)")),
+              QStringLiteral("快捷键: 切换主题绑了 Ctrl+Shift+T"));
+
+        // 替换是 Ctrl+H（QKeySequence 没有标准的 Replace）
+        check(cpp.contains(QStringLiteral("Qt::CTRL | Qt::Key_H")), QStringLiteral("快捷键: 替换绑了 Ctrl+H"));
+    }
+
+    // ============================ F. 拖拽打开（6.2）============================
+    {
+        std::printf("---- F. 拖拽打开 ----\n");
+
+        check(cpp.contains(QStringLiteral("setAcceptDrops(true)")),
+              QStringLiteral("拖拽: 窗口开了接受拖放"));
+        check(cpp.contains(QStringLiteral("void MainWindow::dragEnterEvent("))
+                  && cpp.contains(QStringLiteral("void MainWindow::dropEvent(")),
+              QStringLiteral("拖拽: dragEnterEvent 与 dropEvent 都实现了"));
+        check(cpp.contains(QStringLiteral("event->acceptProposedAction()")),
+              QStringLiteral("拖拽: 接受时会 acceptProposedAction（鼠标不再显示禁止图标）"));
+
+        // ---- 真正的逻辑：从 MIME 数据里挑文件（纯函数，直接调）----
+        // 这个函数不碰窗口，所以能在这里真跑一遍 —— 它是"拖什么能打开"的全部规则。
+        const QString tempDir = QDir::tempPath() + QStringLiteral("/md-editor-drop-test");
+        QDir(tempDir).removeRecursively();
+        QDir().mkpath(tempDir);
+
+        const QString mdFile = tempDir + QStringLiteral("/note.md");
+        const QString markdownFile = tempDir + QStringLiteral("/readme.markdown");
+        const QString txtFile = tempDir + QStringLiteral("/plain.txt");
+        const QString exeFile = tempDir + QStringLiteral("/app.exe");
+        for (const QString &path : {mdFile, markdownFile, txtFile, exeFile}) {
+            QFile file(path);
+            file.open(QIODevice::WriteOnly);
+            file.write("x");
+        }
+
+        QMimeData data;
+        QList<QUrl> urls;
+        urls << QUrl::fromLocalFile(mdFile) << QUrl::fromLocalFile(markdownFile) << QUrl::fromLocalFile(txtFile)
+             << QUrl::fromLocalFile(exeFile) << QUrl(QStringLiteral("https://example.com/remote.md"));
+        data.setUrls(urls);
+
+        const QStringList dropped = MainWindow::droppedFiles(&data);
+        check(dropped.size() == 3, QStringLiteral("拖拽: 只收 md / markdown / txt（exe 和网址被挡掉）"),
+              QStringLiteral("%1 个：%2").arg(dropped.size()).arg(dropped.join(QStringLiteral(", "))));
+        check(dropped.contains(mdFile) && dropped.contains(markdownFile) && dropped.contains(txtFile),
+              QStringLiteral("拖拽: 三个文本文件都在"));
+        check(!dropped.contains(exeFile), QStringLiteral("拖拽: .exe 不会被打开（避免把二进制灌进编辑器）"));
+        check(MainWindow::droppedFiles(nullptr).isEmpty(), QStringLiteral("拖拽: 空数据 -> 空（不崩）"));
+
+        QMimeData textOnly;
+        textOnly.setText(QStringLiteral("拖的是文字，不是文件"));
+        check(MainWindow::droppedFiles(&textOnly).isEmpty(), QStringLiteral("拖拽: 拖来一段文字 -> 不打开"));
+
+        // 拖一个目录进来 = 打开里面第一层的 md（不递归）
+        const QString subDir = tempDir + QStringLiteral("/notes");
+        QDir().mkpath(subDir);
+        QFile inner(subDir + QStringLiteral("/inner.md"));
+        inner.open(QIODevice::WriteOnly);
+        inner.write("x");
+        QMimeData dirData;
+        dirData.setUrls({QUrl::fromLocalFile(subDir)});
+        const QStringList fromDir = MainWindow::droppedFiles(&dirData);
+        check(fromDir.size() == 1 && fromDir.first() == subDir + QStringLiteral("/inner.md"),
+              QStringLiteral("拖拽: 拖目录 -> 打开里面的 .md"), fromDir.join(QStringLiteral(", ")));
+
+        QDir(tempDir).removeRecursively();
+    }
+
+    // ============================ G. 窗口记忆（6.2）============================
+    {
+        std::printf("---- G. 窗口记忆 ----\n");
+
+        check(cpp.contains(QStringLiteral("void MainWindow::restoreSession()"))
+                  && cpp.contains(QStringLiteral("void MainWindow::saveSession() const")),
+              QStringLiteral("记忆: 有恢复与保存两个函数"));
+        check(cpp.contains(QStringLiteral("restoreGeometry(state.geometry)")),
+              QStringLiteral("记忆: 用 Qt 的 restoreGeometry（多显示器/DPI 由 Qt 处理）"));
+        check(cpp.contains(QStringLiteral("saveGeometry()")), QStringLiteral("记忆: 用 saveGeometry 存几何"));
+        check(cpp.contains(QStringLiteral("SessionState::load()")) && cpp.contains(QStringLiteral("SessionState::save(")),
+              QStringLiteral("记忆: 读写都走 SessionState（那一层能自动测）"));
+        check(cpp.contains(QStringLiteral("saveSession();")) && cpp.contains(QStringLiteral("event->accept();")),
+              QStringLiteral("记忆: 关窗口时保存（而且是在用户确认关闭之后）"));
+        check(cpp.contains(QStringLiteral("QFileInfo::exists(path)")),
+              QStringLiteral("记忆: 上次的文件在磁盘上没了就跳过（不弹窗打扰）"));
     }
 
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);

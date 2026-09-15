@@ -10,6 +10,8 @@
 class QKeyEvent;
 class QPaintEvent;
 class QResizeEvent;
+class QContextMenuEvent;
+class QMenu;
 class MarkdownHighlighter;  // 全局命名空间的类（命名空间不统一的遗留）
 
 // 编辑器核心控件：在 QPlainTextEdit 之上补齐"写 Markdown 需要的东西"。
@@ -106,6 +108,12 @@ public:
     // 数一数全文有几处（给"共 N 处"这类提示用）
     int countOccurrences(const QString &text, bool caseSensitive = false) const;
 
+    // ============================ 右键菜单 ============================
+    // 造一份编辑器右键菜单（调用方负责 delete）：
+    // 基类的标准项（撤销/重做/剪切/复制/粘贴/删除/全选）+ 我们自己的"查找/替换"和"插入代码块"。
+    // 公开出来是为了让"菜单里有哪些动作、什么时候禁用"也能被测到（和 FileTreeView 一个做法）。
+    QMenu *createContextMenu();
+
     // ============================ 纯函数（能单独测）============================
 
     // 输入 opener 时该补上的闭合字符；不是成对字符就返回空字符串。
@@ -133,9 +141,15 @@ signals:
     // 光标位置变了。行、列**都从 1 起算**（人类数的第几行第几列）。
     void cursorMoved(int line, int column);
 
+    // 右键菜单里选了"查找/替换…"：对话框归主窗口管（编辑器不自己弹窗）
+    void findRequested();
+    // 右键菜单里选了"插入代码块…"：语言列表在高亮器那边，所以也交给主窗口
+    void insertCodeBlockRequested();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);

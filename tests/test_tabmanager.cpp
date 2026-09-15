@@ -13,7 +13,9 @@
 #include "editorwidget.h"
 #include "tabmanager.h"
 
+#include <QAction>
 #include <QApplication>
+#include <QMenu>
 #include <QPointer>
 #include <QString>
 #include <QStringList>
@@ -216,6 +218,101 @@ int main(int argc, char *argv[])
         check(reported == QStringList({QStringLiteral("b.md"), QStringLiteral("a.md"), QStringLiteral("c.md")}),
               QStringLiteral("排序: 信号里带的是新顺序"), reported.join(QLatin1Char(',')));
         check(tabs.tabTitles() == reported, QStringLiteral("排序: tabTitles() 与实际顺序一致"));
+    }
+
+    // ============================ G. 右键菜单与"关其它/关右侧"（6.2）============================
+    {
+        TabManager tabs;
+        tabs.addEditorTab(QStringLiteral("a.md"));
+        tabs.addEditorTab(QStringLiteral("b.md"));
+        tabs.addEditorTab(QStringLiteral("c.md"));
+
+        // 标签的"磁盘路径"是给右键菜单的"复制路径/在文件管理器中显示"用的
+        TabManager::TabInfo infoA;
+        infoA.fileName = QStringLiteral("a.md");
+        infoA.filePath = QStringLiteral("D:/notes/a.md");
+        tabs.updateTab(0, infoA);
+        TabManager::TabInfo infoB;
+        infoB.fileName = QStringLiteral("b.md");
+        tabs.updateTab(1, infoB);  // b 故意不给路径（模拟"新建还没保存"）
+
+        check(tabs.tabFilePath(0) == QStringLiteral("D:/notes/a.md"),
+              QStringLiteral("路径: updateTab 记下了文件路径"), tabs.tabFilePath(0));
+        check(tabs.tabFilePath(1).isEmpty(), QStringLiteral("路径: 没路径的标签返回空"));
+        check(tabs.tabFilePath(99).isEmpty(), QStringLiteral("路径: 越界返回空（不崩）"));
+
+        // ---- 菜单结构 ----
+        QMenu *menu = tabs.createTabContextMenu(0);
+        QStringList texts;
+        for (QAction *action : menu->actions()) {
+            texts << (action->isSeparator() ? QStringLiteral("---") : action->text());
+        }
+        check(texts.contains(QStringLiteral("关闭标签")) && texts.contains(QStringLiteral("关闭其它标签"))
+                  && texts.contains(QStringLiteral("关闭右侧标签")) && texts.contains(QStringLiteral("全部关闭")),
+              QStringLiteral("菜单: 关闭/关闭其它/关闭右侧/全部关闭 都在"), texts.join(QStringLiteral(" / ")));
+        check(texts.contains(QStringLiteral("复制文件路径")) && texts.contains(QStringLiteral("在文件管理器中显示")),
+              QStringLiteral("菜单: 有复制路径与在文件管理器中显示"));
+
+        const auto enabledOf = [&menu](const QString &text) {
+            for (QAction *action : menu->actions()) {
+                if (action->text() == text) {
+                    return action->isEnabled();
+                }
+            }
+            return false;
+        };
+        check(enabledOf(QStringLiteral("复制文件路径")), QStringLiteral("菜单: 有路径的标签 -> 复制路径可用"));
+        check(enabledOf(QStringLiteral("关闭其它标签")) && enabledOf(QStringLiteral("关闭右侧标签")),
+              QStringLiteral("菜单: 中间那个标签 -> 关其它/关右侧都可用"));
+        delete menu;
+
+        // 第一个标签：右边还有别的，所以"关闭右侧"可用；最后一个标签则不该可用
+        QMenu *firstMenu = tabs.createTabContextMenu(0);
+        QMenu *lastMenu = tabs.createTabContextMenu(2);
+        const auto enabledIn = [](QMenu *m, const QString &text) {
+            for (QAction *action : m->actions()) {
+                if (action->text() == text) {
+                    return action->isEnabled();
+                }
+            }
+            return false;
+        };
+        check(enabledIn(firstMenu, QStringLiteral("关闭右侧标签")),
+              QStringLiteral("菜单: 第一个标签 -> 关闭右侧可用"));
+        check(!enabledIn(lastMenu, QStringLiteral("关闭右侧标签")),
+              QStringLiteral("菜单: 最后一个标签 -> 关闭右侧禁用（右边没有东西）"));
+        delete firstMenu;
+        delete lastMenu;
+
+        // 没有路径的标签："复制路径"要禁用（否则会复制出一个空串）
+        QMenu *noPathMenu = tabs.createTabContextMenu(1);
+        check(!enabledIn(noPathMenu, QStringLiteral("复制文件路径")),
+              QStringLiteral("菜单: 没路径的标签 -> 复制路径禁用"));
+        delete noPathMenu;
+
+        // ---- 关闭行为也要走"先问一声"那条路 ----
+        int asked = 0;
+        tabs.setCloseConfirmHandler([&](EditorWidget *) {
+            ++asked;
+            return false;  // 一律取消
+        });
+        check(!tabs.requestCloseOtherTabs(0), QStringLiteral("关其它: 用户取消 -> 返回 false"));
+        check(tabs.count() == 3, QStringLiteral("关其它: 取消时一个都没关"), QStringLiteral("count=%1").arg(tabs.count()));
+        check(!tabs.requestCloseTabsToRight(0), QStringLiteral("关右侧: 用户取消 -> 返回 false"));
+        check(tabs.count() == 3, QStringLiteral("关右侧: 取消时一个都没关"));
+
+        tabs.setCloseConfirmHandler([](EditorWidget *) { return true; });
+        check(tabs.requestCloseTabsToRight(0), QStringLiteral("关右侧: 同意 -> 成功"));
+        check(tabs.count() == 1 && tabs.tabTitles().first().startsWith(QStringLiteral("a.md")),
+              QStringLiteral("关右侧: 只剩最左边那个"), tabs.tabTitles().join(QLatin1Char(',')));
+
+        // 关其它：现在只剩一个标签了，先补两个再试
+        tabs.addEditorTab(QStringLiteral("d.md"));
+        tabs.addEditorTab(QStringLiteral("e.md"));
+        check(tabs.count() == 3, QStringLiteral("关其它: 准备（3 个标签）"));
+        check(tabs.requestCloseOtherTabs(0), QStringLiteral("关其它: 同意 -> 成功"));
+        check(tabs.count() == 1 && tabs.tabTitles().first().startsWith(QStringLiteral("a.md")),
+              QStringLiteral("关其它: 只留下被右键的那一个"), tabs.tabTitles().join(QLatin1Char(',')));
     }
 
     if (g_fail == 0) {

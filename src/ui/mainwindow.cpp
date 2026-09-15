@@ -22,6 +22,8 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>  // 文件树/搜索面板是停靠窗口：要调 setFeatures 得用它
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -31,6 +33,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
@@ -96,6 +99,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     // 先开一个空标签，保证界面上永远有一个可编辑的地方（后面所有代码就能少写一堆判空）
     createSession();
     updateWindowTitle();
+
+    // ---- 拖拽打开（6.2）----
+    // 主窗口接受拖放：把 .md 从资源管理器拖进来就能打开（实现在 dragEnterEvent/dropEvent）
+    setAcceptDrops(true);
+
+    // ---- 窗口记忆（6.2）----
+    // 放在最后：上面的接线都做好了，恢复会话时不管关掉/新建标签都不会踩到半成品状态。
+    restoreSession();
 }
 
 MainWindow::~MainWindow()
@@ -409,6 +420,9 @@ void MainWindow::initEditActions()
 
     m_undoAction = addEditorAction(QStringLiteral("撤销(&U)"), QKeySequence::Undo, &QPlainTextEdit::undo);
     m_redoAction = addEditorAction(QStringLiteral("重做(&R)"), QKeySequence::Redo, &QPlainTextEdit::redo);
+    // 重做在 Windows 上是 Ctrl+Y，在 macOS/Linux 上是 Ctrl+Shift+Z。这里两个都收：
+    // 用户从别的编辑器过来时手会是习惯的那个。
+    m_redoAction->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::Key_Y)});
 
     editMenu->addSeparator();
     m_cutAction = addEditorAction(QStringLiteral("剪切(&T)"), QKeySequence::Cut, &QPlainTextEdit::cut);
@@ -451,7 +465,8 @@ void MainWindow::initToolBar()
     m_togglePreviewAction = toolBar->addAction(QStringLiteral("预览"));
     m_togglePreviewAction->setCheckable(true);
     m_togglePreviewAction->setChecked(true);
-    m_togglePreviewAction->setToolTip(QStringLiteral("显示/隐藏预览区（等价于 视图 → 仅编辑）"));
+    m_togglePreviewAction->setShortcut(QKeySequence(Qt::Key_F11));  // 6.2：切换预览 = F11
+    m_togglePreviewAction->setToolTip(QStringLiteral("显示/隐藏预览区（F11，等价于 视图 → 仅编辑）"));
     connect(m_togglePreviewAction, &QAction::toggled, this, [this](bool shown) {
         // 勾着 = 左右分屏；取消 = 仅编辑。其它模式（仅预览）从视图菜单进，
         // 这里只做"预览这一块的开关"，语义保持简单。
@@ -461,7 +476,8 @@ void MainWindow::initToolBar()
 
     m_darkThemeAction = toolBar->addAction(QStringLiteral("暗色主题"));
     m_darkThemeAction->setCheckable(true);
-    m_darkThemeAction->setToolTip(QStringLiteral("在亮色 / 暗色主题之间切换"));
+    m_darkThemeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));  // 6.2：切换主题
+    m_darkThemeAction->setToolTip(QStringLiteral("在亮色 / 暗色主题之间切换（Ctrl+Shift+T）"));
     connect(m_darkThemeAction, &QAction::toggled, this, [this](bool dark) {
         ThemeManager::instance().setTheme(dark ? ThemeManager::Theme::Dark : ThemeManager::Theme::Light);
     });
@@ -603,6 +619,10 @@ void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
     connect(editor, &QPlainTextEdit::redoAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
     connect(editor, &QPlainTextEdit::copyAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
     connect(editor, &QPlainTextEdit::selectionChanged, this, [refreshEditActions] { refreshEditActions(); });
+
+    // 编辑器右键菜单里的两项：对话框/语言列表都在主窗口这边，编辑器只发"用户要这个"
+    connect(editor, &EditorWidget::findRequested, this, &MainWindow::onFind);
+    connect(editor, &EditorWidget::insertCodeBlockRequested, this, &MainWindow::onInsertCodeBlock);
 
     connect(files, &FileManager::fileOpened, this, [this, files](const QString &path) {
         onFileOpened(files, path);
@@ -1656,6 +1676,167 @@ void MainWindow::onAbout()
                  QLatin1String(qVersion())));
 }
 
+// ============================ 拖拽打开（6.2）============================
+//
+// 从资源管理器把 .md 拖进窗口就能打开。三步里只有两步需要写：
+//   dragEnterEvent：决定"接不接受"。不接受的话鼠标会显示禁止图标，用户立刻知道不行。
+//   dragMoveEvent：位置变化时的回调。这里**故意不重写** —— 默认实现沿用了
+//                  dragEnterEvent 的答案（accept/ignore 状态会保持），我们也没有
+//                  "拖到不同区域做不同事"的需求。
+//   dropEvent：真正打开文件。
+
+// 纯逻辑：从拖进来的 MIME 数据里挑出可打开的文件。
+// 规则写得保守一点：只收本地文件（不是 http/ftp 那种），只收 Markdown/纯文本后缀，
+// 拖进来的目录会被展开成里面第一层的 .md（"拖个文件夹过来"是很常见的操作）。
+QStringList MainWindow::droppedFiles(const QMimeData *data)
+{
+    QStringList paths;
+    if (data == nullptr || !data->hasUrls()) {
+        return paths;
+    }
+
+    // 后缀白名单和"打开文件"对话框里的过滤器保持一致，免得两边对不上
+    const QStringList allowedSuffixes = {QStringLiteral("md"), QStringLiteral("markdown"), QStringLiteral("txt")};
+
+    for (const QUrl &url : data->urls()) {
+        if (!url.isLocalFile()) {
+            continue;  // 网络地址：我们打不开（也不该去下载）
+        }
+        const QFileInfo info(url.toLocalFile());
+        if (info.isDir()) {
+            // 目录：找出里面第一层的 Markdown 文件（不递归 —— 拖一个大目录进来
+            // 一下开几十个标签更可能是事故，不是本意）
+            const QDir dir(info.absoluteFilePath());
+            const QStringList entries = dir.entryList(QStringList{QStringLiteral("*.md"), QStringLiteral("*.markdown")},
+                                                      QDir::Files,
+                                                      QDir::Name);
+            for (const QString &name : entries) {
+                paths << dir.absoluteFilePath(name);
+            }
+            continue;
+        }
+        if (info.isFile() && allowedSuffixes.contains(info.suffix().toLower())) {
+            paths << info.absoluteFilePath();
+        }
+    }
+    return paths;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    // 只看"能不能从里面挑出文件"：挑不出来就不接受（鼠标会显示禁止图标）
+    if (!droppedFiles(event->mimeData()).isEmpty()) {
+        event->acceptProposedAction();
+        return;
+    }
+    event->ignore();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QStringList paths = droppedFiles(event->mimeData());
+    if (paths.isEmpty()) {
+        event->ignore();
+        return;
+    }
+
+    event->acceptProposedAction();
+
+    // 多个文件就依次打开（openFile 对"已经开着的文件"会切过去，不会重复开）
+    int opened = 0;
+    for (const QString &path : paths) {
+        if (openFile(path)) {
+            ++opened;
+        }
+    }
+    LOG_INFO("拖拽打开：%1 个文件（收到 %2 个）", opened, paths.size());
+    statusBar()->showMessage(opened == 1 ? QStringLiteral("已打开：%1").arg(QFileInfo(paths.first()).fileName())
+                                         : QStringLiteral("已打开 %1 个文件").arg(opened),
+                             5000);
+}
+
+// ============================ 窗口记忆（6.2）============================
+
+void MainWindow::restoreSession()
+{
+    const SessionState::Data state = SessionState::load();
+
+    // ---- 窗口几何 ----
+    // restoreGeometry() 自己会处理"存档里的显示器已经拔了/分辨率变了"这种情况：
+    // 恢复不了时返回 false，这时就保持 .ui 里的默认大小，别把窗口摆到看不见的地方。
+    if (!state.geometry.isEmpty() && !restoreGeometry(state.geometry)) {
+        LOG_WARN("上次的窗口位置恢复不了（显示器变了？），这次用默认大小");
+    }
+
+    // ---- 停靠面板 ----
+    ui->fileTreeDock->setVisible(state.fileTreeVisible);
+    ui->searchDock->setVisible(state.searchPanelVisible);
+
+    // ---- 上次打开的文件 ----
+    // 先收集"还存在的"：磁盘上没了的直接跳过（只记一条日志，不弹窗打扰）。
+    // 一个都没有时，那个开着的空标签就留着用。
+    QStringList existing;
+    for (const QString &path : state.openFiles) {
+        if (QFileInfo::exists(path)) {
+            existing << path;
+        } else {
+            LOG_INFO("上次打开的文件已经不在了，跳过：%1", path);
+        }
+    }
+
+    if (existing.isEmpty()) {
+        return;
+    }
+
+    // 第一个文件复用那个空标签：新建的窗口本来会留一个"未命名"空标签，
+    // 直接在那个标签里打开第一个文件，就不会多出一个没用的空标签。
+    EditorWidget *first = currentEditor();
+    if (first != nullptr && first->document()->isEmpty()) {
+        FileManager *files = filesFor(first);
+        QString error;
+        if (files != nullptr && files->openFile(existing.first(), &error)) {
+            first->setPlainText(files->text());
+            updateTabLabel(files);
+            existing.removeFirst();
+        }
+    }
+
+    for (const QString &path : existing) {
+        openFile(path);
+    }
+
+    // 回到上次正在看的那一个
+    if (state.currentIndex > 0 && state.currentIndex < ui->tabManager->count()) {
+        ui->tabManager->setCurrentIndex(state.currentIndex);
+    }
+    statusBar()->showMessage(QStringLiteral("已恢复上次的会话（%1 个文件）").arg(ui->tabManager->count()), 5000);
+}
+
+QStringList MainWindow::openFilePaths() const
+{
+    // 按标签顺序收集"有磁盘路径"的标签（没保存过的新文档没有路径，不记）
+    QStringList paths;
+    for (int i = 0; i < ui->tabManager->count(); ++i) {
+        if (const FileManager *files = filesFor(ui->tabManager->editorAt(i))) {
+            if (files->hasFilePath()) {
+                paths << files->filePath();
+            }
+        }
+    }
+    return paths;
+}
+
+void MainWindow::saveSession() const
+{
+    SessionState::Data state;
+    state.geometry = saveGeometry();
+    state.openFiles = openFilePaths();
+    state.currentIndex = ui->tabManager->currentIndex();
+    state.fileTreeVisible = ui->fileTreeDock->isVisible();
+    state.searchPanelVisible = ui->searchDock->isVisible();
+    SessionState::save(state);
+}
+
 // 关窗口：**每个**有未保存修改的标签都问一遍。
 // 和关标签共用 maybeSave()，保证两种入口的行为完全一致 ——
 // 少这一处的话，用户点右上角关闭就会把没保存的内容丢掉。
@@ -1667,5 +1848,10 @@ void MainWindow::closeEvent(QCloseEvent *event)
             return;
         }
     }
+
+    // 真的要关了：把窗口几何 + 这次打开的文件记下来（下次启动恢复）。
+    // 放在"用户没取消"之后：取消关闭时不该把状态写进去，否则下次启动会恢复一个
+    // 用户其实没打算留下的会话。
+    saveSession();
     event->accept();
 }
