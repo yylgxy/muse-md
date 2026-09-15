@@ -26,7 +26,9 @@
       <!-- 中央区是一台"工作台"（我们自己的 QSplitter 子类）：左右分屏、三种显示模式、
            以及编辑器与预览之间的双向同步都归它管。.ui 只描述"左边放编辑器容器、
            右边放预览"这个结构，行为都在 EditorWorkbench 里。 -->
-      <!-- 左边是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
+      <!-- 最左边是文件树侧边栏（5.4.1）：显示当前工作目录，双击文件就在标签页里打开。 -->
+      <widget class="FileTreeView" name="fileTree"/>
+      <!-- 中间是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
            编辑器不在 .ui 里，因为"有几个"是运行期才知道的。 -->
       <widget class="TabManager" name="tabManager">
        <property name="tabsClosable">
@@ -72,6 +74,12 @@
    <class>EditorWorkbench</class>
    <extends>QSplitter</extends>
    <header>editorworkbench.h</header>
+  </customwidget>
+  <!-- FileTreeView 继承 QTreeView，header 指向 filetreeview.h（同样由 business 提供）。 -->
+  <customwidget>
+   <class>FileTreeView</class>
+   <extends>QTreeView</extends>
+   <header>filetreeview.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

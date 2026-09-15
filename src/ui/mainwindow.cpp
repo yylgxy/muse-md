@@ -4,8 +4,10 @@
 
 #include "editorwidget.h"       // .ui 里的 tabManager 会用它的页面；界面要连它的 cursorMoved
 #include "editorworkbench.h"    // .ui 中央区那台"工作台"（分屏 + 预览 + 双向同步）
+#include "filetreeview.h"       // 5.4.1：左边的文件树侧边栏（.ui 里已经有一块 FileTreeView）
 #include "logger.h"
 #include "previewrenderer.h"    // updateContent() 要用完整类型（渲染管线归工作台持有，这里只是借来用）
+#include "recentfiles.h"        // 5.4.2：最近打开的文件列表
 #include "tabmanager.h"
 
 #include <QAction>
@@ -49,6 +51,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     initMenuBar();
     initToolBar();
     initStatusBar();
+
+    // 最近文件（5.4.2）：先把上次退出时的列表读回来，再据此建出菜单。
+    // 菜单也要能自更新 —— changed() 是唯一的"列表变了"通知（加一条、删一条、清空都会发）。
+    m_recent.load();
+    connect(&m_recent, &RecentFiles::changed, this, &MainWindow::rebuildRecentMenu);
+    rebuildRecentMenu();
 
     // 先开一个空标签，保证界面上永远有一个可编辑的地方（后面所有代码就能少写一堆判空）
     createSession();
@@ -96,6 +104,42 @@ void MainWindow::initUi()
 
     // 切标签 → 换预览、换标题、换状态栏
     connect(ui->tabManager, &TabManager::currentEditorChanged, this, &MainWindow::onCurrentTabChanged);
+
+    // ---- 文件树侧边栏（5.4.1）----
+    // 侧边栏是 .ui 里 workbench 的**第一块**子控件，所以它已经在分屏里了；
+    // 工作台不认识它（工作台只管"编辑器侧 / 预览侧"两块），也不该认识 ——
+    // 侧边栏是"另一条独立的东西"，三种显示模式切来切去都不影响它。
+    ui->fileTree->setRootPath(QDir::currentPath());  // 没选过目录时从工作目录开始
+
+    // 初始比例只能由这里给：工作台不知道 splitter 里一共有几块（见 EditorWorkbench::setSplitSizes）
+    ui->workbench->setSplitSizes({220, 490, 490});
+
+    // 双击（或回车）一个文件 → 开成新标签。
+    // 侧边栏本身不认识标签页，它只发"用户点了这个文件"，开到哪里是主窗口的事。
+    connect(ui->fileTree, &FileTreeView::fileActivated, this, [this](const QString &path) { openFile(path); });
+
+    // 右键菜单的新建/删除/重命名：文件操作侧边栏自己做完了（它不弹窗的那几个函数是公开的），
+    // 这里只负责把结果表达出来 —— 状态栏说一句、日志留一条，必要时把侧边栏切到新文件那儿。
+    connect(ui->fileTree, &FileTreeView::fileCreated, this, [this](const QString &path) {
+        LOG_INFO("侧边栏新建文件：%1", path);
+        statusBar()->showMessage(QStringLiteral("已新建：%1").arg(path));
+        openFile(path);  // 新建出来通常就是马上要写东西，直接开成标签
+    });
+    connect(ui->fileTree, &FileTreeView::fileRemoved, this, [this](const QString &path) {
+        LOG_INFO("侧边栏删除：%1", path);
+        statusBar()->showMessage(QStringLiteral("已删除：%1").arg(path));
+    });
+    connect(ui->fileTree, &FileTreeView::fileRenamed, this, [this](const QString &oldPath, const QString &newPath) {
+        LOG_INFO("侧边栏重命名：%1 → %2", oldPath, newPath);
+        // 注意：如果被改名的文件正开在标签里，那个会话记的还是旧路径
+        //（FileManager 不提供"改路径"操作，硬改会让脏标志/历史仓库错位）。
+        // 所以这里只提示一句，让用户自己决定重新打开。
+        statusBar()->showMessage(QStringLiteral("已重命名为：%1").arg(newPath));
+    });
+    connect(ui->fileTree, &FileTreeView::errorOccurred, this, [this](const QString &message) {
+        // 侧边栏自己已经弹过窗了，这里只在状态栏留个痕
+        statusBar()->showMessage(message, 5000);
+    });
 }
 
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
@@ -112,6 +156,14 @@ void MainWindow::initMenuBar()
     m_openAction = fileMenu->addAction(QStringLiteral("打开(&O)…"));
     m_openAction->setShortcut(QKeySequence::Open);
     connect(m_openAction, &QAction::triggered, this, &MainWindow::onOpenFile);
+
+    // ---- 文件树侧边栏（5.4.1）：选一个目录作为侧边栏的根 ----
+    m_openFolderAction = fileMenu->addAction(QStringLiteral("打开文件夹(&K)…"));
+    connect(m_openFolderAction, &QAction::triggered, this, &MainWindow::onOpenFolder);
+
+    // ---- 最近打开（5.4.2）----
+    // 只建"壳"：条目由 rebuildRecentMenu() 按 m_recent 的内容重建。
+    m_recentMenu = fileMenu->addMenu(QStringLiteral("最近打开(&R)"));
 
     m_saveAction = fileMenu->addAction(QStringLiteral("保存(&S)"));
     m_saveAction->setShortcut(QKeySequence::Save);
@@ -183,6 +235,17 @@ void MainWindow::initMenuBar()
     m_viewPreviewOnlyAction = addViewAction(QStringLiteral("仅预览(&3)"),
                                             QKeySequence(Qt::CTRL | Qt::Key_3),
                                             EditorWorkbench::ViewMode::PreviewOnly);
+
+    // ---- 文件树侧边栏开关（5.4.1）----
+    viewMenu->addSeparator();
+    m_showFileTreeAction = viewMenu->addAction(QStringLiteral("显示文件树(&F)"));
+    m_showFileTreeAction->setCheckable(true);
+    m_showFileTreeAction->setChecked(true);  // .ui 里默认就是可见的，勾选状态要和它一致
+    connect(m_showFileTreeAction, &QAction::toggled, this, [this](bool visible) {
+        // 只是隐藏，不销毁：QFileSystemModel 的目录监听和展开状态都留着，
+        // 再打开时还是原来的样子。
+        ui->fileTree->setVisible(visible);
+    });
 
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
@@ -343,6 +406,8 @@ bool MainWindow::openFile(const QString &path)
     for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
         if (it.value()->filePath() == path) {
             ui->tabManager->setCurrentIndex(ui->tabManager->indexOf(it.key()));
+            m_recent.add(path);  // 它确实是"刚打开过"的，置个顶
+            syncSidebarTo(path);
             return true;
         }
     }
@@ -368,6 +433,11 @@ bool MainWindow::openFile(const QString &path)
 
     // 换文档了：baseUrl 必须跟着换（forceReload = true）
     showSession(files, true);
+
+    // 打开成功才算"打开过"：失败的那条路径不该进最近列表（否则菜单里全是打不开的东西）。
+    // 去重/置顶/截断都在 RecentFiles 里，这里只管交路径。
+    m_recent.add(path);
+    syncSidebarTo(path);
     return true;
 }
 
@@ -398,6 +468,99 @@ void MainWindow::onOpenFile()
     if (!path.isEmpty()) {
         openFile(path);
     }
+}
+
+// 选一个目录当文件树的根（5.4.1）。
+// 注意它**不等于**"打开一个工作区"：这里只是让侧边栏换个地方看文件，
+// 不改变编辑器的状态，也不关任何标签。
+void MainWindow::onOpenFolder()
+{
+    const QString startDir = ui->fileTree->rootPath().isEmpty() ? QDir::homePath() : ui->fileTree->rootPath();
+    const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择要显示在侧边栏的文件夹"), startDir);
+    if (dir.isEmpty()) {
+        return;  // 用户取消了
+    }
+
+    ui->fileTree->setRootPath(dir);
+    statusBar()->showMessage(QStringLiteral("文件树：%1").arg(QDir::toNativeSeparators(dir)));
+}
+
+// 侧边栏跟着当前文档走：根目录已经是这个文件的上级时不动，否则切到文件所在目录。
+// 为什么要"已经在里面就不动"：用户可能特意把根设成了一个大目录、正在往下翻，
+// 每打开一个文件都把根抢走会让人没法用。
+void MainWindow::syncSidebarTo(const QString &filePath)
+{
+    if (filePath.isEmpty() || ui->fileTree == nullptr) {
+        return;
+    }
+
+    const QString dir = QDir::cleanPath(QFileInfo(filePath).absolutePath());
+    const QString root = QDir::cleanPath(ui->fileTree->rootPath());
+
+    if (!root.isEmpty()) {
+        // Windows 上路径大小写不敏感，所以要 CaseInsensitive 地比
+        const bool same = (QString::compare(dir, root, Qt::CaseInsensitive) == 0);
+        const bool inside = dir.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive);
+        if (same || inside) {
+            return;  // 已经看得到这个文件了
+        }
+    }
+
+    ui->fileTree->setRootPath(dir);
+}
+
+// ============================ 最近打开（5.4.2）============================
+
+// 按当前列表重建子菜单。条目最多 10 条，整块重建比增量更新简单、也不可能出现"菜单和列表不一致"。
+// 三种条目：能打开的、已经不存在的（禁用 + 标注）、以及列表为空时的一句说明。
+void MainWindow::rebuildRecentMenu()
+{
+    if (m_recentMenu == nullptr) {
+        return;
+    }
+
+    m_recentMenu->clear();
+
+    const QStringList files = m_recent.files();
+    if (files.isEmpty()) {
+        QAction *emptyAction = m_recentMenu->addAction(QStringLiteral("（还没有打开过文件）"));
+        emptyAction->setEnabled(false);
+        return;
+    }
+
+    for (const QString &path : files) {
+        // 菜单里显示原生分隔符：Windows 用户看着 \ 更顺眼
+        QAction *action = m_recentMenu->addAction(QDir::toNativeSeparators(path));
+        action->setToolTip(path);
+
+        if (!RecentFiles::fileExists(path)) {
+            // 文件被移走/删掉了：留着这一条（用户可能只是临时拔了 U 盘），但标出来并且点不动。
+            // 想彻底去掉它：先清空列表再重新打开，或者把文件放回去。
+            action->setEnabled(false);
+            action->setText(action->text() + QStringLiteral("（文件已不存在）"));
+            continue;
+        }
+
+        connect(action, &QAction::triggered, this, [this, path] { openRecentFile(path); });
+    }
+
+    m_recentMenu->addSeparator();
+    QAction *clearAction = m_recentMenu->addAction(QStringLiteral("清除最近文件(&C)"));
+    connect(clearAction, &QAction::triggered, &m_recent, &RecentFiles::clear);
+}
+
+// 打开一条最近记录。文件不存在时：说一句、并把它从列表里摘掉
+//（这就是 FileTreeView 那套"操作失败要说清原因"的同一种做法）。
+bool MainWindow::openRecentFile(const QString &path)
+{
+    if (!RecentFiles::fileExists(path)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("文件已不存在"),
+                             QStringLiteral("这个文件找不到了：\n%1\n\n已经把它从「最近打开」里去掉。").arg(path));
+        m_recent.remove(path);
+        return false;
+    }
+    return openFile(path);
 }
 
 bool MainWindow::saveSession(FileManager *files, EditorWidget *editor)
@@ -452,6 +615,10 @@ bool MainWindow::saveSessionAs(FileManager *files, EditorWidget *editor)
     if (files == currentFiles()) {
         showSession(files, true);
     }
+
+    // 另存为也算"用过这个文件"：下次在「最近打开」里能找到它
+    m_recent.add(path);
+    syncSidebarTo(path);
     return true;
 }
 

@@ -7,11 +7,13 @@
 
 #include "editorworkbench.h"  // 显示模式的枚举类型出现在槽签名里，需要完整定义
 #include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
+#include "recentfiles.h"      // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
 
 class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
 class QActionGroup;
 class QLabel;
+class QMenu;
 
 // uic 会把 mainwindow.ui 编译成 ui_mainwindow.h，里面是 namespace Ui { class MainWindow; }，
 // 成员就是 .ui 里那些控件的指针（tabManager / preview / splitter / menubar / statusbar …）。
@@ -63,6 +65,7 @@ protected:
 private slots:
     void onNewFile();       // 多标签时代 = 新建一个标签
     void onOpenFile();
+    void onOpenFolder();    // 5.4.1：把文件树侧边栏切到某个目录
     void onSaveFile();
     void onSaveFileAs();
     void onCloseTab();
@@ -134,6 +137,18 @@ private:
     // （差异可能几百行，需要等宽字体、不折行、可选可复制，QMessageBox 不够用）
     void showTextDialog(const QString &title, const QString &header, const QString &body);
 
+    // ============================ 最近文件（5.4.2）============================
+    // 按 m_recent 里的列表重建「文件 → 最近打开」子菜单。
+    // 列表一变就整个重建：条目最多 10 个，重建比"精确增量更新"简单也难出错。
+    void rebuildRecentMenu();
+    // 打开一条最近记录。文件已经不在了就提示一句、并把它从列表里摘掉。
+    bool openRecentFile(const QString &path);
+
+    // ============================ 文件树侧边栏（5.4.1）============================
+    // 让侧边栏跟着当前文档走：根目录已经是这个文件的上级时**不动**
+    //（用户正在树下浏览，别把他的位置抢走），否则切到文件所在目录。
+    void syncSidebarTo(const QString &filePath);
+
     void updateWindowTitle();
     // 状态栏右侧那行缓存状态（当前标签的缓存：条数 / 命中次数 / 命中率）
     void updateCacheStatus();
@@ -151,6 +166,7 @@ private:
 
     QAction *m_newAction = nullptr;
     QAction *m_openAction = nullptr;
+    QAction *m_openFolderAction = nullptr;  // 5.4.1：选一个目录做文件树的根
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
     QAction *m_closeTabAction = nullptr;
@@ -164,6 +180,13 @@ private:
     QAction *m_viewEditorOnlyAction = nullptr;   // 视图：仅编辑
     QAction *m_viewPreviewOnlyAction = nullptr;  // 视图：仅预览
     QActionGroup *m_viewModeGroup = nullptr;     // 三个显示模式互斥
+    QAction *m_showFileTreeAction = nullptr;     // 视图：显示/隐藏文件树侧边栏
+
+    QMenu *m_recentMenu = nullptr;  // 文件 →「最近打开」子菜单（内容随列表重建）
+
+    // 最近文件列表（5.4.2）。按值持有：它就是主窗口状态的一部分，
+    // 由 MainWindow 的构造函数统一 load()、由 changed() 信号驱动菜单重建。
+    RecentFiles m_recent;
 
     QLabel *m_cacheLabel = nullptr;   // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
     QLabel *m_cursorLabel = nullptr;  // 状态栏上的"行 x，列 y"（来自 EditorWidget::cursorMoved）

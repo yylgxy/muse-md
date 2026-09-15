@@ -78,9 +78,11 @@ bool EditorWorkbench::setup(QWidget *editorSide, QWidget *previewSide)
     // 少了这一步，传进来的控件如果本来是隐藏的，就要等用户第一次切模式才会出现。
     applyViewMode(m_mode);
 
-    // 初始比例：左右各一半（原来这段在 .ui 的 QSplitter 上，现在归工作台管）
-    m_savedSizes = {1, 1};
-    setSizes({600, 600});
+    // 初始比例**不在这里设**：工作台只认"编辑器侧"和"预览侧"两块，但 splitter 里可能还有第三块
+    //（比如左边的文件树侧边栏）。只有调用方知道一共有几块、要按什么比例分，
+    // 所以初始比例由调用方在 setup() 之后自己 setSizes()。
+    // 这里只把当前比例记下来，供显示模式来回切换时恢复。
+    m_savedSizes = sizes();
 
     // 预览侧如果真的是 QWebEngineView，就把渲染管线和 WebChannel 接上。
     // 用 qobject_cast 而不是写死类型：这样测试可以传一个普通 QWidget，
@@ -157,6 +159,15 @@ void EditorWorkbench::setViewMode(ViewMode mode)
     emit viewModeChanged(mode);
 }
 
+void EditorWorkbench::setSplitSizes(const QList<int> &sizes)
+{
+    if (sizes.size() != count() || sizes.isEmpty()) {
+        return;  // 数目和 splitter 里的块数对不上：宁可不动，也不要把某一块压成 0 宽
+    }
+    setSizes(sizes);
+    m_savedSizes = sizes;  // 记住它，"切到单栏再切回分屏"时恢复的就是这一份
+}
+
 void EditorWorkbench::applyViewMode(ViewMode mode)
 {
     // 直接操作"哪一块可见"，不依赖它们在 splitter 里的先后顺序
@@ -188,8 +199,9 @@ void EditorWorkbench::rememberSplitSizes()
 
 void EditorWorkbench::restoreSplitSizes()
 {
-    if (m_savedSizes.size() != count()) {
-        setSizes({600, 600});  // 结构不对（比如根本没 setup）时退回默认比例
+    if (m_savedSizes.isEmpty() || m_savedSizes.size() != count()) {
+        // 记录的比例和当前的块数对不上（比如 setup() 之后又插了一块控件）：
+        // 什么都别动。瞎 setSizes 会把某一侧压成 0 宽，那比"比例没恢复"糟糕得多。
         return;
     }
     setSizes(m_savedSizes);

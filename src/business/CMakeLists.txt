@@ -7,6 +7,10 @@ add_library(business STATIC
     tabmanager.cpp
     editorworkbench.h
     editorworkbench.cpp
+    filetreeview.h
+    filetreeview.cpp
+    recentfiles.h
+    recentfiles.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。
@@ -18,15 +22,17 @@ target_include_directories(business PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # ★ 同一个 target 的 target_link_libraries 必须全部用 keyword 形式
 #   （原来是旧式写法，加 keyword 就得整行都改）。
 #
-# Qt6::Widgets 是 PUBLIC：EditorWidget 继承 QPlainTextEdit，qplaintextedit.h 出现在
-#           它自己的头文件里，属于接口的一部分。
-# core_document / core_storage 是 PUBLIC：EditorWidget 里绑定了 MarkdownHighlighter
+# Qt6::Widgets 是 PUBLIC：这些控件都继承 Qt Widgets 的类，头文件出现在接口里。
+# core_document / core_storage 是 PUBLIC：EditorWidget 绑定了 MarkdownHighlighter
 #           （属于 core/document）；将来业务层还会用到 FileManager（core/storage）。
+# infrastructure 是 PRIVATE：RecentFiles 只在 .cpp 里用 ConfigManager，不暴露出去。
 target_link_libraries(business
     PUBLIC
         core_document
         core_storage
         Qt6::Widgets
+    PRIVATE
+        infrastructure
 )
 
 # 兜底依赖：改任何头文件都重编本目录的目标。

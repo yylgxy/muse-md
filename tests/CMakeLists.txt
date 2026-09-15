@@ -189,11 +189,43 @@ target_link_libraries(test_editorworkbench
 )
 add_test(NAME editorworkbench COMMAND test_editorworkbench)
 
+# ---------------- RecentFiles 契约测试（5.4.2）----------------
+# 这个测试会真的读写配置文件，但**用 setFilePath() 把配置指到临时目录**，
+# 不碰用户真实的 <AppData>/Dev/MarkdownEditor/config.ini。
+# 它同时把 ConfigManager（配置层）一起测了：两者是"存取"和"规则"的关系，
+# 拆成两个测试程序反而要各写一遍临时目录的准备工作。
+# 只需要 QCoreApplication（RecentFiles 是 QObject，要发 changed()）。
+add_executable(test_recentfiles
+    test_recentfiles.cpp
+)
+target_link_libraries(test_recentfiles
+    business
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME recentfiles COMMAND test_recentfiles)
+
+# ---------------- FileTreeView 契约测试（5.4.1）----------------
+# 需要 QApplication（QXxxView 依赖它，QFileSystemModel 还依赖事件循环）。
+# 三个文件操作（createFile/renamePath/removePath）本来是给右键菜单用的，
+# 因为做成了"不弹窗的公开函数"，这里才能直接测 —— 无窗口环境下弹窗是走不通的。
+# 全部在临时目录里干活。
+add_executable(test_filetreeview
+    test_filetreeview.cpp
+)
+target_link_libraries(test_filetreeview
+    business
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME filetreeview COMMAND test_filetreeview)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。
