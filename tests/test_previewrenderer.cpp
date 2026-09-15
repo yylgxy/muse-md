@@ -239,6 +239,75 @@ int main(int argc, char *argv[])
         check(!renderer.hasPendingUpdate(), QStringLiteral("防抖 = 0 时不进入待处理（等于不防抖）"));
     }
 
+    // ============================ 内容上限（大文件不再能把预览拖死）============================
+    // 这一段是一个真实故障的回归测试：在文件树里双击打开了 7 MB 的 .ilk（二进制）之后，
+    // 预览的渲染进程被拖死，界面从此一片空白、连日志都不报错，只能重启程序。
+    // 现在的规则是"超限就只推一小段说明"，所以这两条纯函数必须钉死。
+    {
+        const int limit = PreviewRenderer::kMaxContentChars;
+        check(limit == 1000000, QStringLiteral("上限: 就是 1,000,000 个字符"), QString::number(limit));
+        check(PreviewRenderer::kMaxRendererRestarts == 3,
+              QStringLiteral("上限: 渲染进程最多自动恢复 3 次（不会无限空转）"));
+
+        const QString small = QStringLiteral("# 标题\n\n一段正常的内容");
+        check(!PreviewRenderer::exceedsContentLimit(small), QStringLiteral("上限: 正常文档不超限"));
+        check(!PreviewRenderer::exceedsContentLimit(QString()), QStringLiteral("上限: 空内容不超限"));
+
+        // 边界：正好等于上限不算超，多一个字符才算
+        const QString exactly(limit, QLatin1Char('a'));
+        check(!PreviewRenderer::exceedsContentLimit(exactly), QStringLiteral("上限: 正好等于上限 -> 不超"));
+        check(PreviewRenderer::exceedsContentLimit(exactly + QLatin1Char('a')),
+              QStringLiteral("上限: 多一个字符 -> 超限"));
+
+        // 超限时替代推送的那段 HTML：必须"自带宽高 + 说清多大 + 不夹带原文"
+        const QString huge(limit + 12345, QLatin1Char('x'));
+        const QString notice = PreviewRenderer::contentTooLargeHtml(huge);
+        check(notice.contains(QStringLiteral("1.0 兆字符")) || notice.contains(QStringLiteral("100.1 万字符")),
+              QStringLiteral("超限提示: 说得出到底多大"), notice.left(48));
+        check(notice.contains(QString::number(limit)), QStringLiteral("超限提示: 说得出上限是多少"));
+        check(notice.contains(QStringLiteral("预览已暂停")), QStringLiteral("超限提示: 明确说预览被暂停了"));
+        check(notice.contains(QStringLiteral("二进制")),
+              QStringLiteral("超限提示: 提醒「可能是二进制文件」（最常见的原因）"));
+        check(notice.size() < 2000, QStringLiteral("超限提示: 它本身必须很小（不能又变成大内容）"),
+              QStringLiteral("%1 字符").arg(notice.size()));
+        check(!notice.contains(QStringLiteral("xxxxx")), QStringLiteral("超限提示: 不夹带原文"));
+
+        // 超限内容不会被送去解析/推送 —— 没附着页面时 pushNow 本来就是空操作，
+        // 这里验证"内容仍然记着、防抖仍然正常"，也就是程序状态没有被大内容搞乱
+        PreviewRenderer renderer;
+        renderer.setDebounceInterval(1);
+        renderer.updateContent(huge);
+        spin(30);
+        check(!renderer.hasPendingUpdate(), QStringLiteral("超限: 处理完之后没有卡在待处理状态"));
+        check(!renderer.isPageReady(), QStringLiteral("超限: 没附着页面时依然不是就绪状态（不崩）"));
+    }
+
+    // ============================ 渲染进程崩了要能自愈 ============================
+    {
+        PreviewRenderer renderer;
+        check(renderer.rendererRestartCount() == 0, QStringLiteral("自愈: 一开始恢复次数是 0"));
+
+        int restarted = 0;
+        int skipped = 0;
+        QObject::connect(&renderer, &PreviewRenderer::rendererRestarted, [&restarted](int) { ++restarted; });
+        QObject::connect(&renderer, &PreviewRenderer::contentSkipped, [&skipped](const QString &) { ++skipped; });
+
+        // 没附着页面（测试环境里就是如此）时被通知"渲染进程结束了"：
+        // 必须什么都不做 —— 既不空转重载，也不发信号，更不许崩。
+        const bool invoked = QMetaObject::invokeMethod(&renderer,
+                                                      "onRenderProcessTerminated",
+                                                      Q_ARG(int, 1),
+                                                      Q_ARG(int, 139));
+        check(invoked, QStringLiteral("自愈: 崩溃处理入口能被元对象系统调用"));
+        check(renderer.rendererRestartCount() == 0, QStringLiteral("自愈: 没有页面时不空转（恢复次数仍是 0）"));
+        check(restarted == 0 && skipped == 0, QStringLiteral("自愈: 没有页面时不发信号"));
+
+        // 上面那次调用之后仍然能正常工作：说明"渲染进程没了"这件事没把渲染器弄坏
+        renderer.setDebounceInterval(0);
+        renderer.updateContent(QStringLiteral("# 还能用"));
+        check(!renderer.hasPendingUpdate(), QStringLiteral("自愈: 崩溃之后渲染器还能继续接内容"));
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== PreviewRenderer 契约测试：全部通过 ===\n");
     } else {

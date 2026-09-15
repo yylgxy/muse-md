@@ -36,6 +36,9 @@
 
 using markdown_editor::core::storage::CacheManager;
 using markdown_editor::core::storage::VersionControl;
+// 渲染管线的类型要写全名：它和 FileManager 不一样，以前只用到它的成员函数、不用提名字，
+// 现在要连它的信号（contentSkipped / rendererRestarted），所以需要这个 using。
+using markdown_editor::core::document::PreviewRenderer;
 // 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
 // 成员函数体里直接用短名字就行，不会和全局作用域冲突。
 // 预览渲染管线与同步桥也不在这里了：它们归 EditorWorkbench 所有。
@@ -88,6 +91,17 @@ void MainWindow::initUi()
     // 显示模式变化 → 同步菜单勾选（也可能是代码里改的，所以以信号为准）
     connect(ui->workbench, &EditorWorkbench::viewModeChanged, this, &MainWindow::onViewModeChanged);
     onViewModeChanged(ui->workbench->viewMode());
+
+    // 预览侧的两种"异常情况"必须让用户看得见，否则预览一片空白时人根本不知道发生了什么：
+    //   * contentSkipped：内容太大被跳过（或者渲染进程反复崩溃后放弃了自动恢复）
+    //   * rendererRestarted：渲染进程崩了，正在自动恢复（几秒后就自己好了）
+    connect(ui->workbench->renderer(), &PreviewRenderer::contentSkipped, this, [this](const QString &reason) {
+        LOG_WARN("预览:%1", reason);
+        statusBar()->showMessage(reason, 10000);
+    });
+    connect(ui->workbench->renderer(), &PreviewRenderer::rendererRestarted, this, [this](int attempt) {
+        statusBar()->showMessage(QStringLiteral("预览的渲染进程重启了，正在自动恢复（第 %1 次）…").arg(attempt), 5000);
+    });
 
     // ---- 标签页 ----
     // 关标签前"要不要保存"的对话框由主窗口提供：TabManager 只负责"问一声、按答案决定关不关"。

@@ -314,6 +314,67 @@ int main(int argc, char *argv[])
         check(!files.modifiedTime().isValid(), QStringLiteral("时间戳: newFile 之后又变成无效"));
     }
 
+    // ============================ 3c. 二进制文件（拒绝打开，且不误伤文本）============================
+    // 这一段是真实故障的回归测试：在文件树里双击到 .pdb / .ilk / .docx 这类二进制文件时，
+    // 内容被当成文本读进来，再整段推给预览，把预览的渲染进程拖死 ——
+    // 界面从此一片空白，连日志都不报错，只能重启程序。
+    // 所以现在：二进制文件在"打开"这一步就被明确拒绝（并说清原因）。
+    {
+        // ---- 纯函数层面的规则 ----
+        check(!FileManager::looksBinary(QString()), QStringLiteral("binary: 空内容 -> 不是二进制"));
+        check(!FileManager::looksBinary(QStringLiteral("# 标题\n\n正文，中文英文混排\n")),
+              QStringLiteral("binary: 正常中英文文本 -> 不是二进制"));
+        check(!FileManager::looksBinary(QStringLiteral("第一行\r\n第二行\t带制表符和换页\f")),
+              QStringLiteral("binary: 制表符/换行/换页都算正常文本"));
+        check(FileManager::looksBinary(QStringLiteral("abc\x00") + QStringLiteral("def")),
+              QStringLiteral("binary: 出现 NUL 字符 -> 是二进制"));
+        check(FileManager::looksBinary(QString(200, QChar(1))),
+              QStringLiteral("binary: 大量控制字符 -> 是二进制"));
+        check(!FileManager::looksBinary(QString(200, QLatin1Char('a')) + QChar(0x1A)),
+              QStringLiteral("binary: 只末尾一个控制字符（老文件用 ^Z 结尾）-> 仍算文本"));
+
+        // ---- 真的读盘：二进制文件必须被拒绝，而且当前文档一点都不能变 ----
+        const QString binPath = work + QStringLiteral("/fake.exe");
+        QByteArray bin("MZ");  // 假装是个可执行文件头
+        bin.append(QByteArray(64, '\0'));
+        for (int i = 0; i < 256; ++i) {
+            bin.append(char(i));
+        }
+        writeRaw(binPath, bin);
+
+        FileManager files;
+        const QString textPath = work + QStringLiteral("/text-before-binary.md");
+        FileUtils::writeFileBytes(textPath, QStringLiteral("打开失败不该影响这份内容\n").toUtf8());
+        QString err;
+        check(files.openFile(textPath, &err), QStringLiteral("binary: 先打开一个正常文档"), err);
+        const QString textBefore = files.text();
+
+        check(!files.openFile(binPath, &err), QStringLiteral("binary: 打开二进制文件 -> false"));
+        check(err.contains(QStringLiteral("二进制")), QStringLiteral("binary: 原因里明说是二进制文件"), err);
+        check(files.text() == textBefore && files.filePath() == textPath,
+              QStringLiteral("binary: 拒绝之后当前文档完全没变"));
+        check(!files.isModified(), QStringLiteral("binary: 拒绝之后脏标志也没被弄脏"));
+
+        // ---- ★ 绝不能误伤：UTF-16（原始字节里满是 0x00）和 GBK 都必须照常打开 ----
+        // 这是"在解码之后判断"这条设计的价值所在：UTF-16 文本的 0x00 在解码时已经
+        // 和相邻字节配成字符了，所以它不会被误判成二进制。
+        const QString u16Path = work + QStringLiteral("/utf16-note.md");
+        writeRaw(u16Path, FileManager::encode(QStringLiteral("# UTF-16 标题\n\n正文\n"),
+                                             FileManager::Encoding::Utf16LE));
+        check(readRaw(u16Path).contains('\0'),
+              QStringLiteral("binary 反例: 这个 UTF-16 文件的原始字节里确实有 0x00"));
+        check(files.openFile(u16Path, &err), QStringLiteral("binary 反例: UTF-16 文档照常打开"), err);
+        check(files.text() == QStringLiteral("# UTF-16 标题\n\n正文\n") && !files.isModified(),
+              QStringLiteral("binary 反例: 内容正确（没有被误判成二进制）"),
+              QStringLiteral("%1 字符").arg(files.text().size()));
+
+        const QString gbkPath = work + QStringLiteral("/gbk-note.md");
+        writeRaw(gbkPath, FileManager::encode(QStringLiteral("中文笔记，GBK 编码\n"), FileManager::Encoding::Local8Bit));
+        check(files.openFile(gbkPath, &err), QStringLiteral("binary 反例: GBK 文档照常打开"), err);
+        check(files.text() == QStringLiteral("中文笔记，GBK 编码\n"),
+              QStringLiteral("binary 反例: GBK 内容正确"), files.text());
+    }
+
     // ============================ 4. 只读文件 ============================
     {
         const QString pathRo = work + QStringLiteral("/readonly.md");

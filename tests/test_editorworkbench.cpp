@@ -236,6 +236,67 @@ int main(int argc, char *argv[])
         delete previewSide;
     }
 
+    // ============================ E. 三块的分屏（5.4.1 加了文件树侧边栏之后）============================
+    // 这一段是回归测试：中央区从两块变成三块（文件树 + 编辑器 + 预览）之后，
+    // "初始比例该由谁给"就变了 —— 工作台只知道两块，所以比例只能由调用方用
+    // setSplitSizes() 设。**它必须在 show() 之前设也照样生效**（主窗口就是在构造函数里设的），
+    // 而且三块都不能被挤成 0 宽 —— 那正是"预览不见了"这类问题的成因。
+    {
+        EditorWorkbench workbench;
+
+        // 模仿 uic 生成代码的做法：三块都是 splitter 的子控件，用 addWidget 排进去
+        auto *fileTreeSide = new QWidget();
+        auto *tabs = new TabManager();
+        auto *previewSide = new QWidget();
+        workbench.addWidget(fileTreeSide);
+        workbench.addWidget(tabs);
+        workbench.addWidget(previewSide);
+
+        check(workbench.count() == 3, QStringLiteral("三块: splitter 里有三个部件"),
+              QString::number(workbench.count()));
+        check(workbench.setup(tabs, previewSide), QStringLiteral("三块: setup 成功（侧边栏不参与，也不该参与）"));
+
+        // 主窗口的顺序：setup() 之后立刻设初始比例，此时窗口还没显示
+        workbench.setSplitSizes({220, 490, 490});
+        check(workbench.sizes().size() == 3, QStringLiteral("三块: setSplitSizes 在 show() 之前就接受了"),
+              QStringLiteral("%1").arg(workbench.sizes().value(0)));
+
+        workbench.resize(1200, 800);
+        workbench.show();
+        QCoreApplication::processEvents();
+
+        const QList<int> shown = workbench.sizes();
+        check(shown.size() == 3, QStringLiteral("三块: 显示之后还是三块"));
+        check(shown.value(0) > 0 && shown.value(1) > 0 && shown.value(2) > 0,
+              QStringLiteral("三块: **每一块都有正宽度**（谁都不许是 0）"),
+              QStringLiteral("%1 / %2 / %3").arg(shown.value(0)).arg(shown.value(1)).arg(shown.value(2)));
+        check(shown.value(1) > shown.value(0) && shown.value(2) > shown.value(0),
+              QStringLiteral("三块: 编辑器侧和预览侧都比侧边栏宽（比例按 220/490/490 缩放）"));
+        check(!previewSide->isHidden(), QStringLiteral("三块: 预览侧是显示状态（不是被藏起来）"));
+        check(!tabs->isHidden() && !fileTreeSide->isHidden(),
+              QStringLiteral("三块: 编辑器侧和侧边栏也是显示状态"));
+
+        // 数量对不上时必须拒绝：宁可不动，也不能把某一块压成 0
+        const QList<int> before = workbench.sizes();
+        workbench.setSplitSizes({300, 500});
+        check(workbench.sizes() == before, QStringLiteral("三块: 给两个数（块数对不上）时拒绝，不改动"));
+
+        // 切到"仅编辑"再切回分屏：三块的比例都要回来
+        workbench.setViewMode(EditorWorkbench::ViewMode::EditorOnly);
+        check(previewSide->isHidden(), QStringLiteral("三块: 仅编辑时预览被藏起来"));
+        workbench.setViewMode(EditorWorkbench::ViewMode::Split);
+        const QList<int> restored = workbench.sizes();
+        check(restored.size() == 3 && restored.value(1) > 0 && restored.value(2) > 0,
+              QStringLiteral("三块: 切回来之后三块都还在且都有宽度"),
+              QStringLiteral("%1 / %2 / %3").arg(restored.value(0)).arg(restored.value(1)).arg(restored.value(2)));
+        check(!previewSide->isHidden(), QStringLiteral("三块: 切回分屏后预览重新显示"));
+
+        workbench.hide();
+        delete fileTreeSide;
+        delete tabs;
+        delete previewSide;
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== EditorWorkbench 契约测试：全部通过 ===\n");
     } else {

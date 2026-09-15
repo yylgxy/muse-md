@@ -49,6 +49,20 @@ public:
     // 太短会在打字时不停重排、明显卡顿；太长会觉得预览"跟不上手"。
     static constexpr int kDefaultDebounceMs = 300;
 
+    // 预览内容上限（字符数）：超过就不推给页面，改成推一句提示。
+    //
+    // 为什么必须有这条（不是想当然的防御，是被真实故障逼出来的）：
+    // 把一份几 MB 的文本 —— 比如在文件树里双击误开的 .ilk / .pdb / .docx ——
+    // 整段解析成 HTML、再打包成一条几 MB 的 JS 丢给 Chromium，页面会重排到卡死，
+    // 预览的**渲染进程**甚至会被系统杀掉；而渲染进程死后连 loadFinished 都不来，
+    // 预览于是永远是白的（只有重启程序才恢复，用户根本不知道发生了什么）。
+    // 预览是"看"的地方，不能让"看"把整个程序拖坏：超限就明说"内容太大，预览已暂停"。
+    // 1,000,000 个字符 ≈ 2 MB（UTF-16）到 3 MB（UTF-8），正常笔记远远用不到。
+    static constexpr int kMaxContentChars = 1000000;
+
+    // 渲染进程连续崩这么多次就停止自动恢复：免得"崩 → 重载 → 再崩"空转。
+    static constexpr int kMaxRendererRestarts = 3;
+
     explicit PreviewRenderer(QObject *parent = nullptr);
     ~PreviewRenderer() override;
 
@@ -96,6 +110,18 @@ public:
     bool isPageReady() const;        // 页面（以及里面的 JS）是否已经可以接收内容
     bool hasPendingUpdate() const;   // 是否还有"等防抖到期"的内容
 
+    // 已经自动恢复过几次渲染进程（页面成功加载后清零）。给测试和日志看。
+    int rendererRestartCount() const;
+
+    // ---- 内容上限（纯函数，能脱离 Chromium 单独测）----
+
+    // 这份内容是否超过 kMaxContentChars
+    static bool exceedsContentLimit(const QString &markdown);
+
+    // 超限时用来替代内容的那一小段 HTML：说清"多大、上限多少、怎么恢复"。
+    // 全部用内联样式，不依赖预览模板里的 class（模板换了也不会变成没样式的裸文本）。
+    static QString contentTooLargeHtml(const QString &markdown);
+
     // 把「HTML 片段 + 行号表」打包成一行 JS 调用：
     //     applyContent.apply(null, ["<h1>…</h1>",[1,4,7]]);
     // 为什么走 JSON 而不是字符串拼接：HTML 里的引号、换行、反斜杠会直接把 JS 语法弄坏。
@@ -116,6 +142,20 @@ signals:
     // 页面加载状态变化：开始重载时发 false，加载结束时发 loadFinished 的结果。
     void pageReadyChanged(bool ready);
 
+    // 内容超过上限，预览被跳过了。reason 是一句可以直接放进状态栏/提示的话。
+    // （推给页面的是一段说明，而不是那份巨大的内容 —— 见 kMaxContentChars。）
+    void contentSkipped(const QString &reason);
+
+    // 预览的渲染进程崩了，本类正在自动恢复（第 attempt 次）。
+    void rendererRestarted(int attempt);
+
+private slots:
+    // 预览的渲染进程没了（被系统杀掉 / 自己崩了）：重新载模板把它拉起来。
+    // 参数用 int 而不是 QWebEnginePage::RenderProcessTerminationStatus ——
+    // 那样头文件就得包含 QWebEnginePage，为了一个签名把 WebEngine 的头文件拖进接口不划算。
+    // （做成"槽"不是为了被谁连，而是让元对象系统能调到它：测试可以验证"没有页面时它不空转"。）
+    void onRenderProcessTerminated(int status, int exitCode);
+
 private:
     // 真正干活的地方：解析 → 算行号 → 拼 JS → runJavaScript。
     // 页面未就绪时直接返回（内容留在 m_desired 里等下次）。
@@ -130,6 +170,11 @@ private:
 
     QString m_desired;  // 最近一次被要求渲染的内容（页面就绪后补推的就是它）
     bool m_ready = false;
+
+    // 最近一次载模板用的目录：渲染进程崩了要照原样重载（baseUrl 不能丢，
+    // 否则重载后文档里的相对路径图片会找不到）。
+    QString m_currentBaseDir;
+    int m_rendererRestarts = 0;  // 已经自动恢复过几次（成功加载后清零）
 };
 
 }  // namespace markdown_editor::core::document

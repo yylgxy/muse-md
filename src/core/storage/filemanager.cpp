@@ -71,6 +71,24 @@ bool FileManager::openFile(const QString &path, QString *error)
     const Encoding detected = detectEncoding(raw);
     const QString content = decode(raw, detected);
 
+    // ---- 二进制文件：明确拒绝，而不是把几 MB 乱码灌进编辑器和预览 ----
+    // 场景很真实：在文件树里双击到 .pdb / .ilk / .docx 就走到这里了。那种内容既没法编辑，
+    // 又会被推给预览的渲染进程（那是把预览拖死、甚至让预览永久白屏的最主要来源）。
+    // 拒绝时"对象状态完全不变"，和别的打开失败一样。
+    if (looksBinary(content)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("这看起来是二进制文件（不是文本），Markdown 编辑器打不开它：\n%1\n\n"
+                                    "（%2 字节。想编辑它请用专门的工具。）")
+                         .arg(path)
+                         .arg(raw.size());
+        }
+        LOG_WARN("拒绝打开：看起来是二进制文件 %1（%2 字节，按 %3 解出来仍不像文本）",
+                 path,
+                 raw.size(),
+                 encodingName(detected));
+        return false;
+    }
+
     applyOpenedContent(path, info, content, detected);
     LOG_INFO("已打开: %1（编码 %2，%3 字节，耗时 %4 ms）",
              path,
@@ -126,6 +144,32 @@ void FileManager::rememberInCache(const QString &path, const QString &content, E
     if (!m_cache.insert(path, entry)) {
         LOG_INFO("未进缓存（超过单条上限 %1 字节，或缓存已关闭）: %2", m_cache.maxEntryBytes(), path);
     }
+}
+
+bool FileManager::looksBinary(const QString &text)
+{
+    if (text.isEmpty()) {
+        return false;  // 空文件当然不是二进制（新建出来的空文件也要能打开）
+    }
+
+    // 只看开头一段就够了：二进制文件的开头从来不会像文本；
+    // 顺带让这个判断的开销与文件大小无关（几 MB 的文件也是常数时间）。
+    const int sample = qMin(text.size(), 64 * 1024);
+    int suspicious = 0;
+
+    for (int i = 0; i < sample; ++i) {
+        const ushort code = text.at(i).unicode();
+        if (code == 0) {
+            return true;  // NUL：解码后的文本里不该出现（UTF-16 在解码阶段已经配成字符了）
+        }
+        // 控制字符里只有 tab / 换行 / 回车 / 换页是文本里正常的东西
+        if (code < 0x20 && code != '\t' && code != '\n' && code != '\r' && code != '\f') {
+            ++suspicious;
+        }
+    }
+
+    // 要求"数量够多"且"比例够高"：少数控制字符（老文件用 ^Z 结尾之类）不该被判成二进制
+    return suspicious >= 16 && suspicious * 10 > sample;
 }
 
 bool FileManager::saveFile(QString *error)

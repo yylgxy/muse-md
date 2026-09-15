@@ -85,6 +85,15 @@ QWebEnginePage *PreviewRenderer::attach(QWebEngineView *view)
     // loadFinished 是"模板里的 JS 已经就绪"的信号，之后推内容才安全
     connect(view, &QWebEngineView::loadFinished, this, &PreviewRenderer::onLoadFinished);
 
+    // ★ 渲染进程死了要能自己爬起来。
+    // 为什么必须连这个信号：渲染进程被系统杀掉之后，**loadFinished 不会来**
+    //（页面既没加载成功也没失败，就停在那儿），于是预览永远是白的、日志里连条错误都没有 ——
+    // 这正是"以前预览好好的，打开一个大文件之后预览就再也不显示了，只能重启程序"的成因。
+    // 连上它之后：重载模板 → Chromium 会为页面拉起新的渲染进程 → loadFinished 补推内容。
+    connect(page, &QWebEnginePage::renderProcessTerminated, this, [this](QWebEnginePage::RenderProcessTerminationStatus status, int exitCode) {
+        onRenderProcessTerminated(int(status), exitCode);
+    });
+
     m_ready = false;
     return page;
 }
@@ -123,6 +132,9 @@ bool PreviewRenderer::loadTemplate(const QString &baseDir, QString *error)
     m_ready = false;  // 页面要重新加载，等 loadFinished 之后才能推内容
     emit pageReadyChanged(false);
 
+    // 记住这次用的目录：渲染进程崩了要照原样重载（见 onRenderProcessTerminated）
+    m_currentBaseDir = baseDir;
+
     m_view->setHtml(QString::fromUtf8(file.readAll()), baseUrlFromDir(baseDir));
     return true;
 }
@@ -137,9 +149,48 @@ void PreviewRenderer::onLoadFinished(bool ok)
         return;
     }
 
+    m_rendererRestarts = 0;  // 页面真的起来了：崩溃计数清零（下次崩了还能继续自动恢复）
+
     // 页面就绪：把最近一次要求渲染的内容补推上去（模板刚换、或加载期间来的编辑都在这里兑现）
     pushNow();
     emit pageReadyChanged(true);
+}
+
+void PreviewRenderer::onRenderProcessTerminated(int status, int exitCode)
+{
+    m_ready = false;
+    emit pageReadyChanged(false);
+
+    if (m_view.isNull() || m_page.isNull()) {
+        return;  // 已经没视图可恢复了（未附着或正在销毁），什么都不做
+    }
+
+    if (m_rendererRestarts >= kMaxRendererRestarts) {
+        // 反复崩：多半不是内容的问题（那是另一路：内容超限时根本不会推给页面），
+        // 再重载只会变成"崩→重载→再崩"的空转，所以停下来并说清楚。
+        LOG_ERROR("预览的渲染进程反复结束（已自动恢复 %1 次），停止自动恢复", m_rendererRestarts);
+        emit contentSkipped(QStringLiteral("预览反复崩溃（已尝试自动恢复 %1 次，最后一次状态 %2 / 退出码 %3），"
+                                           "已停止自动恢复；建议重启程序，并看一下日志")
+                                .arg(m_rendererRestarts)
+                                .arg(status)
+                                .arg(exitCode));
+        return;
+    }
+
+    ++m_rendererRestarts;
+    LOG_WARN("预览的渲染进程结束了（状态 %1，退出码 %2），正在自动恢复（第 %3/%4 次）",
+             status,
+             exitCode,
+             m_rendererRestarts,
+             kMaxRendererRestarts);
+    emit rendererRestarted(m_rendererRestarts);
+
+    // 重新载模板 = 让 Chromium 拉起新的渲染进程；加载完成后的 loadFinished 会把
+    // m_desired 里的内容补推上去（内容超限时 pushNow 推的是提示，所以不会又崩一次）。
+    QString error;
+    if (!loadTemplate(m_currentBaseDir, &error)) {
+        LOG_ERROR("自动恢复预览失败：%1", error);
+    }
 }
 
 // ============================ 内容入口与防抖 ============================
@@ -204,12 +255,62 @@ void PreviewRenderer::pushNow()
         return;
     }
 
+    // ---- 内容上限：超限不硬推，改成推一段"内容太大"的说明 ----
+    // 这一条是"预览永远不会被内容拖死"的保证：几 MB 的文本走 md4c → HTML → 几 MB 的
+    // JS 字符串塞给 Chromium，会把这个渲染进程拖到卡死甚至被杀，而杀了之后预览就再也不恢复。
+    // 现在超限时页面收到的是一条很短、很稳的说明，用户一眼就知道为什么没内容。
+    if (exceedsContentLimit(m_desired)) {
+        m_page->runJavaScript(buildApplyScript(contentTooLargeHtml(m_desired), QList<int>()));
+        LOG_WARN("内容超过预览上限：%1 个字符（上限 %2），预览改为显示提示", m_desired.size(), kMaxContentChars);
+        emit contentSkipped(QStringLiteral("内容太大（%1 个字符，超过预览上限 %2），预览已暂停")
+                                .arg(m_desired.size())
+                                .arg(kMaxContentChars));
+        emit contentRendered();  // 页面确实换过内容了：让界面重新对齐滚动位置
+        return;
+    }
+
     const QString html = MarkdownParser::parseToHtml(m_desired);
     const QList<int> lineMap = SyncBridge::buildLineMap(m_desired);
 
     m_page->runJavaScript(buildApplyScript(html, lineMap));
 
     emit contentRendered();
+}
+
+// ============================ 内容上限（纯规则）============================
+
+bool PreviewRenderer::exceedsContentLimit(const QString &markdown)
+{
+    return markdown.size() > kMaxContentChars;
+}
+
+QString PreviewRenderer::contentTooLargeHtml(const QString &markdown)
+{
+    const int chars = markdown.size();
+    // 大小按"人眼能比"的单位说：百万级说兆字符，其余说万字符
+    const QString size = (chars >= 1000000)
+                             ? QStringLiteral("%1 兆字符").arg(double(chars) / 1000000.0, 0, 'f', 1)
+                             : QStringLiteral("%1 万字符").arg(double(chars) / 10000.0, 0, 'f', 1);
+
+    return QStringLiteral(
+               "<div style=\"margin:2rem auto;max-width:32rem;padding:1rem 1.25rem;"
+               "border-left:4px solid #d0a000;background:#fffbe6;color:#5a4600;"
+               "font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;"
+               "line-height:1.7;border-radius:4px;\">"
+               "<div style=\"font-weight:600;margin-bottom:.5rem;\">内容太大，预览已暂停</div>"
+               "<div>这份文档有 %1（%2 个字符），超过预览上限 %3 个字符。</div>"
+               "<div>编辑器里照样可以正常查看、编辑和保存；换到小一点的文档，预览会自动恢复。</div>"
+               "<div style=\"margin-top:.5rem;color:#8a6d00;\">"
+               "（提示：如果你是在文件树里双击打开的，它可能是一个二进制文件，并不是 Markdown 文本。）"
+               "</div></div>")
+        .arg(size)
+        .arg(chars)
+        .arg(kMaxContentChars);
+}
+
+int PreviewRenderer::rendererRestartCount() const
+{
+    return m_rendererRestarts;
 }
 
 QString PreviewRenderer::buildApplyScript(const QString &html, const QList<int> &lineMap)
