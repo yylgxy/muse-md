@@ -386,7 +386,51 @@ int main(int argc, char *argv[])
               QStringLiteral("line=%1 column=%2").arg(lastLine).arg(lastColumn));
     }
 
-    // ============================ H. 语法高亮器已绑定 ============================
+    // ============================ H. goToLine（5.5：预览点击和搜索结果都走它）============================
+    {
+        EditorWidget editor;
+        editor.setPlainText(QStringLiteral("第一行\n第二行\n第三行\n第四行"));
+        editor.resize(400, 300);
+
+        int lastLine = -1;
+        int lastColumn = -1;
+        QObject::connect(&editor, &EditorWidget::cursorMoved, [&](int line, int column) {
+            lastLine = line;
+            lastColumn = column;
+        });
+
+        editor.goToLine(3);
+        check(editor.textCursor().blockNumber() == 2, QStringLiteral("goToLine: 3 行 -> 第 3 个块（0 起算的 2）"),
+              QStringLiteral("block=%1").arg(editor.textCursor().blockNumber()));
+        check(editor.textCursor().positionInBlock() == 0, QStringLiteral("goToLine: 默认落在行首"));
+        check(lastLine == 3 && lastColumn == 1, QStringLiteral("goToLine: 会让状态栏显示第 3 行第 1 列"),
+              QStringLiteral("line=%1 column=%2").arg(lastLine).arg(lastColumn));
+
+        editor.goToLine(2, 3);
+        check(editor.textCursor().blockNumber() == 1 && editor.textCursor().positionInBlock() == 2,
+              QStringLiteral("goToLine: 指定列也能定位（1 起算）"),
+              QStringLiteral("block=%1 pos=%2").arg(editor.textCursor().blockNumber()).arg(editor.textCursor().positionInBlock()));
+
+        // 越界：夹到合法范围，不崩也不跳空
+        editor.goToLine(999);
+        check(editor.textCursor().blockNumber() == 3, QStringLiteral("goToLine: 行号超过总行数 -> 夹到最后一行"),
+              QStringLiteral("block=%1").arg(editor.textCursor().blockNumber()));
+        editor.goToLine(0);
+        check(editor.textCursor().blockNumber() == 0, QStringLiteral("goToLine: 行号 0 -> 夹到第一行"));
+        editor.goToLine(-5);
+        check(editor.textCursor().blockNumber() == 0, QStringLiteral("goToLine: 负行号 -> 还是第一行（不崩）"));
+        editor.goToLine(1, 999);
+        check(editor.textCursor().positionInBlock() == 3,
+              QStringLiteral("goToLine: 列超过这一行的长度 -> 夹到行尾（不会跑到下一行去）"),
+              QStringLiteral("pos=%1 len=%2").arg(editor.textCursor().positionInBlock()).arg(editor.textCursor().block().length()));
+
+        // 空文档：什么也不做，但也不能崩
+        EditorWidget emptyEditor;
+        emptyEditor.goToLine(5);
+        check(emptyEditor.textCursor().blockNumber() == 0, QStringLiteral("goToLine: 空文档里跳转 -> 还是第 1 行（不崩）"));
+    }
+
+    // ============================ I. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;
         check(editor.highlighter() != nullptr, QStringLiteral("高亮: 控件自己绑定了高亮器"));

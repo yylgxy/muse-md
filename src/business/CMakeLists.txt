@@ -11,6 +11,10 @@ add_library(business STATIC
     filetreeview.cpp
     recentfiles.h
     recentfiles.cpp
+    fulltextsearch.h
+    fulltextsearch.cpp
+    searchpanel.h
+    searchpanel.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。
@@ -25,7 +29,13 @@ target_include_directories(business PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Qt6::Widgets 是 PUBLIC：这些控件都继承 Qt Widgets 的类，头文件出现在接口里。
 # core_document / core_storage 是 PUBLIC：EditorWidget 绑定了 MarkdownHighlighter
 #           （属于 core/document）；将来业务层还会用到 FileManager（core/storage）。
-# infrastructure 是 PRIVATE：RecentFiles 只在 .cpp 里用 ConfigManager，不暴露出去。
+# infrastructure 是 PRIVATE：RecentFiles / FullTextSearch 只在 .cpp 里用 ConfigManager / FileUtils。
+# Qt6::Sql 是 PRIVATE：全文搜索（5.5）用 SQLite 存索引，fulltextsearch.h 里有个 QSqlDatabase
+#                     成员，所以"能编译"要求 Qt6::Sql 的头文件可见（Qt 的头文件都在同一个
+#                     include 根下，Qt6::Core 已经带来了）；**链接**时静态库的
+#                     PRIVATE 依赖会被 CMake 以 $<LINK_ONLY:Qt6::Sql> 自动传给最终目标，
+#                     所以链接 business 的人不用自己再写一遍 —— 但测试要直接用
+#                     QSqlDatabase 的话，自己显式链接更清楚。
 target_link_libraries(business
     PUBLIC
         core_document
@@ -33,6 +43,7 @@ target_link_libraries(business
         Qt6::Widgets
     PRIVATE
         infrastructure
+        Qt6::Sql
 )
 
 # 兜底依赖：改任何头文件都重编本目录的目标。

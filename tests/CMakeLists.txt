@@ -221,11 +221,29 @@ target_link_libraries(test_filetreeview
 )
 add_test(NAME filetreeview COMMAND test_filetreeview)
 
+# ---------------- FullTextSearch + SearchPanel 契约测试（5.5）----------------
+# 需要 QApplication（SearchPanel 是控件），也需要 Qt6::Sql（索引是真的 SQLite 库）。
+# 索引库指向临时目录里的文件，不碰用户真实的 search-index.sqlite。
+# 被测的东西分三层：纯函数（查询怎么转义、哪些文件该索引）、真的建索引+搜索
+# （中文 2 字/3 字两条路径、增量重建、重启后还在）、面板（搜索→结果→点击跳转的信号）。
+add_executable(test_fulltextsearch
+    test_fulltextsearch.cpp
+)
+target_link_libraries(test_fulltextsearch
+    business
+    infrastructure
+    Qt6::Sql
+    Qt6::Widgets
+    Qt6::Gui
+    Qt6::Core
+)
+add_test(NAME fulltextsearch COMMAND test_fulltextsearch)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

@@ -6,8 +6,6 @@
 #include "syncbridge.h"
 
 #include <QScrollBar>
-#include <QTextBlock>
-#include <QTextCursor>
 #include <QTextDocument>
 #include <QWebChannel>
 #include <QWebEnginePage>
@@ -33,18 +31,13 @@ EditorWorkbench::EditorWorkbench(QWidget *parent) : QSplitter(parent)
         if (m_editor == nullptr) {
             return;
         }
-        QTextDocument *doc = m_editor->document();
-        if (doc->blockCount() <= 0) {
+        if (m_editor->document()->blockCount() <= 0) {
             return;
         }
 
-        // 1 起算的行号 → blockNumber()（0 起算），并夹到合法范围，
-        // 防止"预览的行号比编辑器行数还大"时越界
-        const int blockNumber = qBound(0, line - 1, doc->blockCount() - 1);
-        QTextCursor cursor(doc->findBlockByNumber(blockNumber));
-        m_editor->setTextCursor(cursor);
-        m_editor->centerCursor();  // 让目标行落在屏幕中间，而不是贴着边
-        m_editor->setFocus();
+        // 跳行只有一份实现（在 EditorWidget 里）：夹范围、居中、拿焦点都在那儿。
+        // 全文搜索的结果跳转走的是同一个方法，两条路的行为因此不可能不一致。
+        m_editor->goToLine(line);  // 行号 1 起算，越界会被夹到合法范围
 
         emit editorLineClicked(line);
     });

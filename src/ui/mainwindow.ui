@@ -51,6 +51,18 @@
   </widget>
   <widget class="QMenuBar" name="menubar"/>
   <widget class="QStatusBar" name="statusbar"/>
+  <!-- 全文搜索面板（5.5）做成停靠窗口：可以拉宽、可以挪、可以关，
+       默认是隐藏的（菜单「视图 → 全文搜索」或 Ctrl+Shift+F 打开）。
+       放在 dock 里还有个好处：完全不动中央那台三块分屏的比例。 -->
+  <widget class="QDockWidget" name="searchDock">
+   <property name="windowTitle">
+    <string>全文搜索</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>1</number>
+   </attribute>
+   <widget class="SearchPanel" name="searchPanel"/>
+  </widget>
  </widget>
  <customwidgets>
   <!-- 自定义控件（提升）都写在这里：Designer 只认识 QtWidgets 里的类，
@@ -80,6 +92,12 @@
    <class>FileTreeView</class>
    <extends>QTreeView</extends>
    <header>filetreeview.h</header>
+  </customwidget>
+  <!-- SearchPanel 继承 QWidget，header 指向 searchpanel.h -->
+  <customwidget>
+   <class>SearchPanel</class>
+   <extends>QWidget</extends>
+   <header>searchpanel.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

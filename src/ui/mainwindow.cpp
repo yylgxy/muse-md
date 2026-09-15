@@ -8,6 +8,7 @@
 #include "logger.h"
 #include "previewrenderer.h"    // updateContent() 要用完整类型（渲染管线归工作台持有，这里只是借来用）
 #include "recentfiles.h"        // 5.4.2：最近打开的文件列表
+#include "searchpanel.h"        // 5.5：全文搜索面板（.ui 里就是一个 SearchPanel）
 #include "tabmanager.h"
 
 #include <QAction>
@@ -154,6 +155,18 @@ void MainWindow::initUi()
         // 侧边栏自己已经弹过窗了，这里只在状态栏留个痕
         statusBar()->showMessage(message, 5000);
     });
+
+    // ---- 全文搜索面板（5.5）----
+    // 面板自己不打开文件：它只发"用户点了这个文件的这一行"，打开和跳行是主窗口的事。
+    // 这样面板既能脱离主窗口单独测，将来也能被别的地方复用（比如"在工作区里搜"）。
+    connect(ui->searchPanel, &SearchPanel::resultActivated, this, &MainWindow::onSearchResultActivated);
+    connect(ui->searchPanel, &SearchPanel::statusMessage, this, [this](const QString &text) {
+        statusBar()->showMessage(text, 8000);
+    });
+
+    // 默认不占地方：菜单「视图 → 全文搜索」或 Ctrl+Shift+F 打开（和主流编辑器一致）
+    ui->searchDock->hide();
+    syncSearchDirectoryToSidebar();
 }
 
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
@@ -260,6 +273,21 @@ void MainWindow::initMenuBar()
         // 再打开时还是原来的样子。
         ui->fileTree->setVisible(visible);
     });
+
+    // ---- 全文搜索面板（5.5）----
+    // Ctrl+Shift+F 是"在文件里搜"的通用手势；面板做成停靠窗口，开关就是它的可见性。
+    m_searchAction = viewMenu->addAction(QStringLiteral("全文搜索(&S)"));
+    m_searchAction->setCheckable(true);
+    m_searchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+    connect(m_searchAction, &QAction::toggled, this, [this](bool visible) {
+        ui->searchDock->setVisible(visible);
+        if (visible) {
+            ui->searchDock->raise();
+        }
+    });
+    // 用户点停靠窗口的 × 关掉时，菜单上的勾也要跟着取消（否则两边状态会不一致）。
+    // 不会来回递归：setChecked 只有在状态真的变了时才发 toggled。
+    connect(ui->searchDock, &QDockWidget::visibilityChanged, m_searchAction, &QAction::setChecked);
 
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
@@ -497,6 +525,7 @@ void MainWindow::onOpenFolder()
 
     ui->fileTree->setRootPath(dir);
     statusBar()->showMessage(QStringLiteral("文件树：%1").arg(QDir::toNativeSeparators(dir)));
+    syncSearchDirectoryToSidebar();  // 搜索面板跟着走：看的是哪个目录，就索引哪个目录
 }
 
 // 侧边栏跟着当前文档走：根目录已经是这个文件的上级时不动，否则切到文件所在目录。
@@ -521,6 +550,7 @@ void MainWindow::syncSidebarTo(const QString &filePath)
     }
 
     ui->fileTree->setRootPath(dir);
+    syncSearchDirectoryToSidebar();
 }
 
 // ============================ 最近打开（5.4.2）============================
@@ -1018,6 +1048,41 @@ void MainWindow::onRollbackToVersion()
     updateCacheStatus();
 
     statusBar()->showMessage(QStringLiteral("已回滚到 %1（内容尚未写盘，按 Ctrl+S 保存）").arg(picked.shortHash));
+}
+
+// ============================ 全文搜索（5.5）============================
+//
+// 面板只发"用户点了这个文件的这一行"，剩下的都是主窗口的事：
+// 打开文件（已经开着就直接切过去）、把光标移到那一行、在状态栏说一句。
+
+void MainWindow::onSearchResultActivated(const QString &filePath, int line)
+{
+    // openFile() 对"已经打开过的文件"会直接切过去，所以这里不用先判断有没有开过。
+    // 打不开时（二进制文件、没权限……）它自己会弹窗说明原因，这里直接收工。
+    if (!openFile(filePath)) {
+        return;
+    }
+
+    EditorWidget *editor = currentEditor();
+    if (editor == nullptr) {
+        return;
+    }
+
+    // 跳行只有一份实现（EditorWidget::goToLine）：夹范围、居中、拿焦点都在里面。
+    // 这里传的是搜索结果里的行号，1 起算，和编辑器/状态栏的约定一致。
+    editor->goToLine(line);
+    statusBar()->showMessage(QStringLiteral("已跳到 %1：第 %2 行").arg(QFileInfo(filePath).fileName()).arg(line), 5000);
+}
+
+// 搜索面板的目录跟着侧边栏的根目录走：用户在侧边栏里看到哪个目录，
+// 搜索就索引哪个目录 —— 不需要在两个地方各选一遍。
+void MainWindow::syncSearchDirectoryToSidebar()
+{
+    const QString root = ui->fileTree->rootPath();
+    if (root.isEmpty()) {
+        return;  // 侧边栏还没定根目录：保持面板上的原样，别把它清空
+    }
+    ui->searchPanel->setDirectory(root);
 }
 
 // ============================ 缓存（4.2.3）============================

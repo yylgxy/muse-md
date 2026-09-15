@@ -80,6 +80,9 @@ private slots:
     // 清空当前文档的内存缓存（4.2.3）
     void onClearCache();
 
+    // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
+    void onSearchResultActivated(const QString &filePath, int line);
+
     // 标签切换（TabManager 的信号；nullptr = 已经没有标签了）
     void onCurrentTabChanged(EditorWidget *editor);
 
@@ -149,6 +152,11 @@ private:
     //（用户正在树下浏览，别把他的位置抢走），否则切到文件所在目录。
     void syncSidebarTo(const QString &filePath);
 
+    // ============================ 全文搜索（5.5）============================
+    // 搜索面板的默认目录跟侧边栏的根目录保持一致 —— 用户在侧边栏里看到的目录，
+    // 就是搜索会去索引的目录，不需要在两处各选一遍。
+    void syncSearchDirectoryToSidebar();
+
     void updateWindowTitle();
     // 状态栏右侧那行缓存状态（当前标签的缓存：条数 / 命中次数 / 命中率）
     void updateCacheStatus();
@@ -181,6 +189,7 @@ private:
     QAction *m_viewPreviewOnlyAction = nullptr;  // 视图：仅预览
     QActionGroup *m_viewModeGroup = nullptr;     // 三个显示模式互斥
     QAction *m_showFileTreeAction = nullptr;     // 视图：显示/隐藏文件树侧边栏
+    QAction *m_searchAction = nullptr;           // 视图：全文搜索面板（Ctrl+Shift+F）
 
     QMenu *m_recentMenu = nullptr;  // 文件 →「最近打开」子菜单（内容随列表重建）
 

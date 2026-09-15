@@ -129,6 +129,32 @@ void EditorWidget::applyIndentWidth()
 }
 
 // ============================================================================
+// 跳转
+// ============================================================================
+
+void EditorWidget::goToLine(int line, int column)
+{
+    const int blocks = document()->blockCount();
+    if (blocks <= 0) {
+        return;  // 理论上不会发生（空文档也有一个块），但没必要为它冒越界的风险
+    }
+
+    // 行：1 起算 → 夹到 [1, 总行数]
+    const int blockNumber = qBound(0, line - 1, blocks - 1);
+    QTextCursor cursor(document()->findBlockByNumber(blockNumber));
+
+    // 列：1 起算 → 夹到这一行的有效范围。
+    // block().length() 含结尾的换行符，所以有效列数是 length()-1（避免把光标放到"行尾之后"）。
+    const int maxColumn = qMax(0, cursor.block().length() - 1);
+    const int offset = qBound(0, column - 1, maxColumn);
+    cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::MoveAnchor, offset);
+
+    setTextCursor(cursor);
+    centerCursor();  // 让目标行落在屏幕中间，而不是贴着上边缘
+    setFocus();
+}
+
+// ============================================================================
 // 行号栏：宽度、位置、绘制
 // ============================================================================
 
