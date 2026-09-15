@@ -489,7 +489,95 @@ int main(int argc, char *argv[])
               editor.toPlainText().replace(QLatin1Char('\n'), QStringLiteral("\\n")));
     }
 
-    // ============================ J. 语法高亮器已绑定 ============================
+    // ============================ J. 查找与替换（编辑菜单要的）============================
+    {
+        EditorWidget editor;
+        editor.setPlainText(QStringLiteral("Alpha beta\nbeta gamma\nBETA delta\n"));
+
+        // ---- findNext：从光标往后找、找完回到开头 ----
+        editor.moveCursor(QTextCursor::Start);
+        check(editor.findNext(QStringLiteral("beta")), QStringLiteral("查找: 找到了（默认不区分大小写）"));
+        check(editor.textCursor().selectedText() == QStringLiteral("beta"),
+              QStringLiteral("查找: 命中的那一段被选中"), editor.textCursor().selectedText());
+        const int firstStart = editor.textCursor().selectionStart();
+
+        check(editor.findNext(QStringLiteral("beta")), QStringLiteral("查找: 再找下一个"));
+        check(editor.textCursor().selectionStart() > firstStart,
+              QStringLiteral("查找: 第二次命中在第一次之后"));
+
+        check(editor.findNext(QStringLiteral("beta")), QStringLiteral("查找: 第三处（大小写不同的 BETA 也算）"));
+        check(editor.textCursor().selectedText() == QStringLiteral("BETA"),
+              QStringLiteral("查找: 命中的是 BETA"), editor.textCursor().selectedText());
+
+        check(editor.findNext(QStringLiteral("beta")), QStringLiteral("查找: 到底之后再找会回到开头（wrap）"));
+        check(editor.textCursor().selectionStart() == firstStart,
+              QStringLiteral("查找: 环绕之后命中的正是第一处"));
+
+        // 关掉环绕：到底就找不到
+        editor.moveCursor(QTextCursor::End);
+        check(!editor.findNext(QStringLiteral("beta"), false, false),
+              QStringLiteral("查找: wrap=false 时走到末尾就返回 false"));
+
+        check(!editor.findNext(QStringLiteral("根本没有这个词")), QStringLiteral("查找: 找不到 -> false"));
+        check(!editor.findNext(QString()), QStringLiteral("查找: 空关键词 -> false（不会死循环）"));
+
+        // 区分大小写
+        editor.moveCursor(QTextCursor::Start);
+        check(editor.findNext(QStringLiteral("BETA"), true), QStringLiteral("查找: 区分大小写时能找到 BETA"));
+        check(editor.textCursor().selectedText() == QStringLiteral("BETA"),
+              QStringLiteral("查找: 区分大小写命中的是 BETA"));
+
+        // ---- findPrevious ----
+        editor.moveCursor(QTextCursor::End);
+        check(editor.findPrevious(QStringLiteral("beta")), QStringLiteral("向上查找: 找到了"));
+        check(editor.textCursor().selectedText() == QStringLiteral("BETA"),
+              QStringLiteral("向上查找: 从末尾往上第一处是 BETA"), editor.textCursor().selectedText());
+
+        // ---- 替换当前 ----
+        editor.setPlainText(QStringLiteral("one two three"));
+        editor.moveCursor(QTextCursor::Start);
+        check(!editor.replaceCurrent(QStringLiteral("two"), QStringLiteral("2")),
+              QStringLiteral("替换: 没选中任何东西时不替换"));
+        editor.findNext(QStringLiteral("two"));
+        check(editor.replaceCurrent(QStringLiteral("two"), QStringLiteral("2")),
+              QStringLiteral("替换: 选中内容正好是要找的词 -> 替换成功"));
+        check(editor.toPlainText() == QStringLiteral("one 2 three"),
+              QStringLiteral("替换: 文档内容正确"), editor.toPlainText());
+        check(!editor.replaceCurrent(QStringLiteral("完全没有"), QStringLiteral("x")),
+              QStringLiteral("替换: 选中的不是要找的词 -> 不误替换"));
+
+        // ---- 统计与全部替换 ----
+        EditorWidget all;
+        all.setPlainText(QStringLiteral("aa bb aa cc AA\n"));
+        check(all.countOccurrences(QStringLiteral("aa")) == 3,
+              QStringLiteral("统计: 不区分大小写时 aa 出现 3 次"),
+              QStringLiteral("%1 次").arg(all.countOccurrences(QStringLiteral("aa"))));
+        check(all.countOccurrences(QStringLiteral("aa"), true) == 2,
+              QStringLiteral("统计: 区分大小写时只有 2 次"));
+
+        const int replaced = all.replaceAll(QStringLiteral("aa"), QStringLiteral("x"));
+        check(replaced == 3, QStringLiteral("全部替换: 替换了 3 处"), QStringLiteral("%1 处").arg(replaced));
+        check(all.toPlainText() == QStringLiteral("x bb x cc x\n"),
+              QStringLiteral("全部替换: 内容正确"), all.toPlainText());
+        check(all.document()->isUndoAvailable(), QStringLiteral("全部替换: 可撤销"));
+        all.undo();
+        check(all.toPlainText() == QStringLiteral("aa bb aa cc AA\n"),
+              QStringLiteral("全部替换: 一次撤销就全部退回（整批是一个 edit block）"), all.toPlainText());
+
+        // ★ 替换文本里又含有搜索词：不能原地打转（"aa" -> "aaa"）
+        EditorWidget tricky;
+        tricky.setPlainText(QStringLiteral("aa\n"));
+        check(tricky.replaceAll(QStringLiteral("aa"), QStringLiteral("aaa")) == 1,
+              QStringLiteral("全部替换: 替换文本里含搜索词时不会死循环"));
+        check(tricky.toPlainText() == QStringLiteral("aaa\n"),
+              QStringLiteral("全部替换: 结果正确"), tricky.toPlainText());
+
+        check(all.replaceAll(QString(), QStringLiteral("x")) == 0,
+              QStringLiteral("全部替换: 空关键词 -> 0（不会死循环）"));
+        check(all.countOccurrences(QString()) == 0, QStringLiteral("统计: 空关键词 -> 0"));
+    }
+
+    // ============================ K. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;
         check(editor.highlighter() != nullptr, QStringLiteral("高亮: 控件自己绑定了高亮器"));

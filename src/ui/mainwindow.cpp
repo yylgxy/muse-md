@@ -21,6 +21,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDockWidget>  // 文件树/搜索面板是停靠窗口：要调 setFeatures 得用它
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -150,14 +151,16 @@ void MainWindow::initUi()
     // 切标签 → 换预览、换标题、换状态栏
     connect(ui->tabManager, &TabManager::currentEditorChanged, this, &MainWindow::onCurrentTabChanged);
 
-    // ---- 文件树侧边栏（5.4.1）----
-    // 侧边栏是 .ui 里 workbench 的**第一块**子控件，所以它已经在分屏里了；
-    // 工作台不认识它（工作台只管"编辑器侧 / 预览侧"两块），也不该认识 ——
-    // 侧边栏是"另一条独立的东西"，三种显示模式切来切去都不影响它。
+    // ---- 文件树侧边栏（5.4.1，主窗口布局那一节改成停靠面板）----
+    // 它现在是左侧的 QDockWidget（见 mainwindow.ui）：能拖到别的停靠区、也能关掉，
+    // 视图菜单里有开关。工作台只管"编辑器侧 / 预览侧"两块，侧边栏不进中央分屏 ——
+    // 三种显示模式切来切去都不影响它。
+    ui->fileTreeDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable
+                                  | QDockWidget::DockWidgetFloatable);
     ui->fileTree->setRootPath(QDir::currentPath());  // 没选过目录时从工作目录开始
 
-    // 初始比例只能由这里给：工作台不知道 splitter 里一共有几块（见 EditorWorkbench::setSplitSizes）
-    ui->workbench->setSplitSizes({220, 490, 490});
+    // 中央分屏现在是"编辑器 + 预览"两块，初始各占一半
+    ui->workbench->setSplitSizes({600, 600});
 
     // 双击（或回车）一个文件 → 开成新标签。
     // 侧边栏本身不认识标签页，它只发"用户点了这个文件"，开到哪里是主窗口的事。
@@ -304,20 +307,23 @@ void MainWindow::initMenuBar()
                                             QKeySequence(Qt::CTRL | Qt::Key_3),
                                             EditorWorkbench::ViewMode::PreviewOnly);
 
-    // ---- 文件树侧边栏开关（5.4.1）----
+    // ---- 文件树侧边栏开关（5.4.1 → 主窗口布局那一节改成停靠面板）----
     viewMenu->addSeparator();
-    m_showFileTreeAction = viewMenu->addAction(QStringLiteral("显示文件树(&F)"));
+    m_showFileTreeAction = viewMenu->addAction(QStringLiteral("文件树(&F)"));
     m_showFileTreeAction->setCheckable(true);
     m_showFileTreeAction->setChecked(true);  // .ui 里默认就是可见的，勾选状态要和它一致
     connect(m_showFileTreeAction, &QAction::toggled, this, [this](bool visible) {
         // 只是隐藏，不销毁：QFileSystemModel 的目录监听和展开状态都留着，
         // 再打开时还是原来的样子。
-        ui->fileTree->setVisible(visible);
+        ui->fileTreeDock->setVisible(visible);
     });
+    // 用户把停靠面板拖走/关掉时，菜单上的勾也要跟着变（两边状态不能不一致）。
+    // 不会来回递归：setChecked 只在状态真的变了时才发 toggled。
+    connect(ui->fileTreeDock, &QDockWidget::visibilityChanged, m_showFileTreeAction, &QAction::setChecked);
 
     // ---- 全文搜索面板（5.5）----
     // Ctrl+Shift+F 是"在文件里搜"的通用手势；面板做成停靠窗口，开关就是它的可见性。
-    m_searchAction = viewMenu->addAction(QStringLiteral("全文搜索(&S)"));
+    m_searchAction = viewMenu->addAction(QStringLiteral("全文搜索面板(&S)"));
     m_searchAction->setCheckable(true);
     m_searchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
     connect(m_searchAction, &QAction::toggled, this, [this](bool visible) {
@@ -364,39 +370,184 @@ void MainWindow::initMenuBar()
     toolsMenu->addSeparator();
     QAction *insertCodeAction = toolsMenu->addAction(QStringLiteral("插入代码块(&K)…"));
     connect(insertCodeAction, &QAction::triggered, this, &MainWindow::onInsertCodeBlock);
+
+    // ---- 帮助菜单 ----
+    QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
+    m_aboutAction = helpMenu->addAction(QStringLiteral("关于(&A)…"));
+    connect(m_aboutAction, &QAction::triggered, this, &MainWindow::onAbout);
+
+    m_aboutQtAction = helpMenu->addAction(QStringLiteral("关于 Qt(&Q)…"));
+    connect(m_aboutQtAction, &QAction::triggered, qApp, &QApplication::aboutQt);
+}
+
+// 编辑菜单：撤销/重做/剪切/复制/粘贴/全选 + 查找/替换。
+//
+// 这些动作都作用于**当前标签的编辑器**（不是"某个编辑器"），所以：
+//   * triggered 里现取 currentEditor()，切标签不用重连；
+//   * 可用状态跟着当前编辑器走（见 onCurrentTabChanged 与 connectSession 里的
+//     undoAvailable / redoAvailable / copyAvailable）。
+// 编辑器自己本来就处理 Ctrl+Z 这些快捷键；这里给动作设同样的键，是为了让
+// 「菜单里显示的那套快捷键」和「按下去真的能用」是同一件事。
+void MainWindow::initEditActions()
+{
+    QMenu *editMenu = menuBar()->addMenu(QStringLiteral("编辑(&E)"));
+
+    const auto addEditorAction = [this, editMenu](const QString &text,
+                                                  const QKeySequence &shortcut,
+                                                  void (QPlainTextEdit::*slot)()) {
+        QAction *action = editMenu->addAction(text);
+        if (!shortcut.isEmpty()) {
+            action->setShortcut(shortcut);
+        }
+        connect(action, &QAction::triggered, this, [this, slot] {
+            if (EditorWidget *editor = currentEditor()) {
+                (editor->*slot)();
+            }
+        });
+        return action;
+    };
+
+    m_undoAction = addEditorAction(QStringLiteral("撤销(&U)"), QKeySequence::Undo, &QPlainTextEdit::undo);
+    m_redoAction = addEditorAction(QStringLiteral("重做(&R)"), QKeySequence::Redo, &QPlainTextEdit::redo);
+
+    editMenu->addSeparator();
+    m_cutAction = addEditorAction(QStringLiteral("剪切(&T)"), QKeySequence::Cut, &QPlainTextEdit::cut);
+    m_copyAction = addEditorAction(QStringLiteral("复制(&C)"), QKeySequence::Copy, &QPlainTextEdit::copy);
+    m_pasteAction = addEditorAction(QStringLiteral("粘贴(&P)"), QKeySequence::Paste, &QPlainTextEdit::paste);
+
+    editMenu->addSeparator();
+    m_selectAllAction = addEditorAction(QStringLiteral("全选(&A)"), QKeySequence::SelectAll, &QPlainTextEdit::selectAll);
+
+    // ---- 查找 / 替换 ----
+    // 注意 Ctrl+F 在 Qt 里是 QKeySequence::Find；编辑器本身不处理它，所以不会冲突。
+    editMenu->addSeparator();
+    m_findAction = editMenu->addAction(QStringLiteral("查找(&F)…"));
+    m_findAction->setShortcut(QKeySequence::Find);
+    connect(m_findAction, &QAction::triggered, this, &MainWindow::onFind);
+
+    m_replaceAction = editMenu->addAction(QStringLiteral("替换(&H)…"));
+    m_replaceAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
+    connect(m_replaceAction, &QAction::triggered, this, &MainWindow::onReplace);
 }
 
 void MainWindow::initToolBar()
 {
     QToolBar *toolBar = addToolBar(QStringLiteral("主工具栏"));
     toolBar->setMovable(false);
-    if (m_newAction) {
-        toolBar->addAction(m_newAction);
-    }
-    if (m_openAction) {
-        toolBar->addAction(m_openAction);
-    }
-    if (m_saveAction) {
-        toolBar->addAction(m_saveAction);
-    }
-    if (m_saveAsAction) {
-        toolBar->addAction(m_saveAsAction);
-    }
+    toolBar->setToolButtonStyle(Qt::ToolButtonTextOnly);  // 没有图标资源，用文字当按钮
+
+    // 常用文件操作
+    toolBar->addAction(m_newAction);
+    toolBar->addAction(m_openAction);
+    toolBar->addAction(m_saveAction);
+    toolBar->addSeparator();
+
+    // 常用编辑操作（和编辑菜单共用同一批 QAction：状态、快捷键都是同一份）
+    toolBar->addAction(m_undoAction);
+    toolBar->addAction(m_redoAction);
+    toolBar->addSeparator();
+
+    // 两个"开关型"的视图按钮：一眼能看出当前状态（勾着 = 开着）
+    m_togglePreviewAction = toolBar->addAction(QStringLiteral("预览"));
+    m_togglePreviewAction->setCheckable(true);
+    m_togglePreviewAction->setChecked(true);
+    m_togglePreviewAction->setToolTip(QStringLiteral("显示/隐藏预览区（等价于 视图 → 仅编辑）"));
+    connect(m_togglePreviewAction, &QAction::toggled, this, [this](bool shown) {
+        // 勾着 = 左右分屏；取消 = 仅编辑。其它模式（仅预览）从视图菜单进，
+        // 这里只做"预览这一块的开关"，语义保持简单。
+        ui->workbench->setViewMode(shown ? EditorWorkbench::ViewMode::Split
+                                        : EditorWorkbench::ViewMode::EditorOnly);
+    });
+
+    m_darkThemeAction = toolBar->addAction(QStringLiteral("暗色主题"));
+    m_darkThemeAction->setCheckable(true);
+    m_darkThemeAction->setToolTip(QStringLiteral("在亮色 / 暗色主题之间切换"));
+    connect(m_darkThemeAction, &QAction::toggled, this, [this](bool dark) {
+        ThemeManager::instance().setTheme(dark ? ThemeManager::Theme::Dark : ThemeManager::Theme::Light);
+    });
 }
 
 void MainWindow::initStatusBar()
 {
     statusBar()->showMessage(QStringLiteral("就绪"));
 
+    // 状态栏的布局：左边是"临时消息区"（statusBar()->showMessage 用的那块），
+    // 右边一排是常驻信息（addPermanentWidget，不会被临时消息顶掉）。
+    // 顺序和"看的时候的眼睛路线"一致：光标 → 字符数 → 修改状态 → 路径 → 缓存。
+
     // 光标位置：由 EditorWidget::cursorMoved 推过来（行列都从 1 起算）
     m_cursorLabel = new QLabel(this);
+    m_cursorLabel->setMinimumWidth(120);
     statusBar()->addPermanentWidget(m_cursorLabel);
 
-    // 右侧常驻的缓存状态：这是"第二次打开同一个文件走了缓存"最直观的可见证据。
-    // 用 addPermanentWidget（不会被临时消息顶掉），鼠标悬停能看到完整统计。
+    // 字符数：整篇文档的字符数（含空白），打字时实时变
+    m_charCountLabel = new QLabel(this);
+    m_charCountLabel->setMinimumWidth(110);
+    statusBar()->addPermanentWidget(m_charCountLabel);
+
+    // 修改状态：已修改 / 已保存。用 ● 和 ○ 一眼区分（文字也在，颜色之外还有形状）
+    m_modifiedLabel = new QLabel(this);
+    m_modifiedLabel->setMinimumWidth(90);
+    statusBar()->addPermanentWidget(m_modifiedLabel);
+
+    // 文件路径：长路径用"中间省略"显示（开头和结尾都看得见），完整路径进 tooltip，
+    // 而且可以选中复制 —— 需要把路径贴到别处时很方便。
+    m_pathLabel = new QLabel(this);
+    m_pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_pathLabel->setMinimumWidth(180);
+    statusBar()->addPermanentWidget(m_pathLabel);
+
+    // 最右侧常驻的缓存状态：这是"第二次打开同一个文件走了缓存"最直观的可见证据。
     m_cacheLabel = new QLabel(this);
     statusBar()->addPermanentWidget(m_cacheLabel);
+
     updateCacheStatus();
+    updateDocumentStatus();
+}
+
+// 状态栏上"当前文档"那一组信息的统一刷新入口。
+// 为什么集中在一起：切标签、打字、保存、光标移动都会影响其中一两项，
+// 分散着更新迟早会漏一处（表现是"状态栏显示的还是上一个文件的信息"）。
+void MainWindow::updateDocumentStatus()
+{
+    FileManager *files = currentFiles();
+    EditorWidget *editor = currentEditor();
+
+    if (files == nullptr || editor == nullptr) {
+        if (m_charCountLabel != nullptr) {
+            m_charCountLabel->setText(QString());
+        }
+        if (m_modifiedLabel != nullptr) {
+            m_modifiedLabel->setText(QString());
+        }
+        if (m_pathLabel != nullptr) {
+            m_pathLabel->setText(QString());
+            m_pathLabel->setToolTip(QString());
+        }
+        return;
+    }
+
+    if (m_charCountLabel != nullptr) {
+        const int chars = editor->toPlainText().size();
+        const int lines = editor->document()->blockCount();
+        m_charCountLabel->setText(QStringLiteral("字符 %1 · 行 %2").arg(chars).arg(lines));
+    }
+
+    if (m_modifiedLabel != nullptr) {
+        const bool modified = files->isModified();
+        m_modifiedLabel->setText(modified ? QStringLiteral("● 未保存") : QStringLiteral("○ 已保存"));
+        m_modifiedLabel->setStyleSheet(modified ? QStringLiteral("color: #b8860b;") : QString());
+        m_modifiedLabel->setToolTip(modified ? QStringLiteral("有未保存的修改（Ctrl+S 保存）")
+                                             : QStringLiteral("内容已经保存到磁盘"));
+    }
+
+    if (m_pathLabel != nullptr) {
+        const QString path = files->hasFilePath() ? QDir::toNativeSeparators(files->filePath())
+                                                 : QStringLiteral("未命名（还没保存过）");
+        // 中间省略：路径的开头（盘符/项目名）和结尾（文件名）都是有用信息
+        m_pathLabel->setText(m_pathLabel->fontMetrics().elidedText(path, Qt::ElideMiddle, 360));
+        m_pathLabel->setToolTip(path);
+    }
 }
 
 // ============================ 会话（一个标签 = 一个文档）============================
@@ -427,6 +578,31 @@ void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
     connect(editor, &EditorWidget::cursorMoved, this, [this, editor](int line, int column) {
         onCursorMoved(editor, line, column);
     });
+
+    // 编辑菜单/工具栏那几个动作的可用状态：跟着**当前编辑器**的能力走。
+    // 信号源是每个编辑器，槽里先判断"你是不是当前那个"，避免后台标签把菜单状态搅乱。
+    const auto refreshEditActions = [this, editor] {
+        if (editor != currentEditor()) {
+            return;
+        }
+        if (m_undoAction != nullptr) {
+            m_undoAction->setEnabled(editor->document()->isUndoAvailable());
+        }
+        if (m_redoAction != nullptr) {
+            m_redoAction->setEnabled(editor->document()->isRedoAvailable());
+        }
+        const bool hasSelection = editor->textCursor().hasSelection();
+        if (m_cutAction != nullptr) {
+            m_cutAction->setEnabled(hasSelection && !editor->isReadOnly());
+        }
+        if (m_copyAction != nullptr) {
+            m_copyAction->setEnabled(hasSelection);
+        }
+    };
+    connect(editor, &QPlainTextEdit::undoAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
+    connect(editor, &QPlainTextEdit::redoAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
+    connect(editor, &QPlainTextEdit::copyAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
+    connect(editor, &QPlainTextEdit::selectionChanged, this, [refreshEditActions] { refreshEditActions(); });
 
     connect(files, &FileManager::fileOpened, this, [this, files](const QString &path) {
         onFileOpened(files, path);
@@ -776,6 +952,7 @@ void MainWindow::onEditorTextChanged(EditorWidget *editor)
     }
 
     updateWindowTitle();
+    updateDocumentStatus();  // 字符数 / 行数 / 修改状态都是随打字变的
 }
 
 // ============================ 标签切换 ============================
@@ -799,6 +976,29 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
     // 状态栏的行列要换成这个标签的光标位置
     const QTextCursor cursor = editor->textCursor();
     onCursorMoved(editor, cursor.blockNumber() + 1, cursor.positionInBlock() + 1);
+
+    // 状态栏那一组"当前文档"信息（字符数/路径/修改状态）也要换成这个标签的
+    updateDocumentStatus();
+
+    // 查找对话框跟着当前标签走：它只认一个编辑器，切标签不重新绑就会"对着旧文件替换"
+    if (m_findDialog.isVisible()) {
+        m_findDialog.setEditor(editor);
+    }
+
+    // 编辑菜单里那些动作的可用状态也要按新编辑器刷新一次
+    if (m_undoAction != nullptr) {
+        m_undoAction->setEnabled(editor->document()->isUndoAvailable());
+    }
+    if (m_redoAction != nullptr) {
+        m_redoAction->setEnabled(editor->document()->isRedoAvailable());
+    }
+    const bool hasSelection = editor->textCursor().hasSelection();
+    if (m_cutAction != nullptr) {
+        m_cutAction->setEnabled(hasSelection && !editor->isReadOnly());
+    }
+    if (m_copyAction != nullptr) {
+        m_copyAction->setEnabled(hasSelection);
+    }
 }
 
 // 预览里被点了一下。光标是工作台跳的（它知道当前编辑器是谁），主窗口只负责界面表达。
@@ -861,6 +1061,7 @@ void MainWindow::onFileOpened(FileManager *files, const QString &path)
     if (files == currentFiles()) {
         updateWindowTitle();
         updateCacheStatus();  // 命中/未命中次数刚刚变了
+        updateDocumentStatus();  // 路径 / 字符数 / 修改状态
     }
 }
 
@@ -872,6 +1073,7 @@ void MainWindow::onFileSaved(FileManager *files, const QString &path)
             QStringLiteral("已保存：%1（%2）").arg(path, FileManager::encodingName(files->encoding())));
         updateWindowTitle();
         updateCacheStatus();  // 保存后缓存里换成了新内容
+        updateDocumentStatus();  // 修改状态回到"已保存"，路径也可能刚变（另存为）
     }
 }
 
@@ -885,6 +1087,7 @@ void MainWindow::onModificationChanged(FileManager *files, bool modified)
         updateWindowTitle();
         statusBar()->showMessage(modified ? QStringLiteral("有未保存的修改")
                                           : QStringLiteral("已保存到磁盘"));
+        updateDocumentStatus();  // 状态栏那个 ● 未保存 / ○ 已保存
     }
 }
 
@@ -1386,8 +1589,7 @@ void MainWindow::updateCacheStatus()
     m_cacheLabel->setToolTip(cache->statisticsText());
 }
 
-void MainWindow::onCursorMoved(EditorWidget *editor, int line, int column)
-{
+void MainWindow::onCursorMoved(EditorWidget *editor, int line, int column){
     // 后台标签的光标变化不该刷新状态栏
     if (m_cursorLabel == nullptr || editor != currentEditor()) {
         return;
@@ -1405,6 +1607,53 @@ void MainWindow::updateWindowTitle()
 
     setWindowTitle(QStringLiteral("%1%2 - Markdown 编辑器")
                        .arg(modified ? QStringLiteral("*") : QString(), name));
+}
+
+// ============================ 查找 / 替换（编辑菜单）============================
+//
+// 对话框自己是"薄壳"：查找/替换的逻辑都在 EditorWidget 里（能脱离界面单独测）。
+// 主窗口只负责两件事：把对话框指向**当前标签**的编辑器、并在切标签时重新指一次。
+
+void MainWindow::onFind()
+{
+    if (currentEditor() == nullptr) {
+        return;
+    }
+    m_findDialog.setEditor(currentEditor());
+    m_findDialog.show();
+    m_findDialog.raise();
+    m_findDialog.activateWindow();
+    m_findDialog.focusSearchField();  // 打开就能直接打字
+}
+
+void MainWindow::onReplace()
+{
+    onFind();  // 同一个对话框：查找和替换是一体的（替换也要先有查找词）
+}
+
+// ============================ 帮助 ============================
+
+void MainWindow::onAbout()
+{
+    const QString version = QCoreApplication::applicationVersion().isEmpty()
+                                ? QStringLiteral("1.0.0")
+                                : QCoreApplication::applicationVersion();
+
+    QMessageBox::about(
+        this,
+        QStringLiteral("关于 Markdown 编辑器"),
+        QStringLiteral("<h3>Markdown 编辑器 %1</h3>"
+                       "<p>一个用 Qt 6 + C++17 写的 Markdown 编辑器，带实时双向预览、"
+                       "本地版本历史、全文搜索、代码高亮与亮暗主题。</p>"
+                       "<p><b>关于：</b>%2<br/>"
+                       "<b>Qt：</b>%3（运行时 %4）<br/>"
+                       "<b>Markdown 渲染：</b>md4c 0.5.3</p>"
+                       "<p>配置与索引都在 <code>%%APPDATA%%/Dev/MarkdownEditor/</code> 下，"
+                       "删掉它们不会丢笔记。</p>")
+            .arg(version,
+                 QCoreApplication::applicationFilePath(),
+                 QLatin1String(qVersion()),
+                 QLatin1String(qVersion())));
 }
 
 // 关窗口：**每个**有未保存修改的标签都问一遍。

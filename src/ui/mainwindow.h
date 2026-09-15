@@ -5,11 +5,12 @@
 #include <QMainWindow>
 #include <QString>
 
-#include "editorworkbench.h"  // 显示模式的枚举类型出现在槽签名里，需要完整定义
-#include "exporter.h"         // 5.6：导出器是整个窗口的一个成员（按值持有）
-#include "filemanager.h"      // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
-#include "recentfiles.h"      // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
-#include "thememanager.h"     // 5.7：主题（槽签名里用它的枚举）
+#include "editorworkbench.h"    // 显示模式的枚举类型出现在槽签名里，需要完整定义
+#include "exporter.h"           // 5.6：导出器是整个窗口的一个成员（按值持有）
+#include "filemanager.h"        // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
+#include "findreplacedialog.h"  // 查找/替换对话框是窗口的一个成员（按值持有）
+#include "recentfiles.h"        // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
+#include "thememanager.h"       // 5.7：主题（槽签名里用它的枚举）
 
 class EditorWidget;  // 业务层的编辑器控件（全局命名空间，和 MainWindow 一致）
 class QAction;
@@ -25,25 +26,39 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
-// 主窗口：左边多标签编辑器（每个标签一个文档）+ 右边共享预览。
+// 主窗口：中央是"编辑器 + 预览"的工作台，两侧/底部是可停靠的面板。
 //
-// 5.2 之后的结构（和单文档时代最大的区别）：
-//   * **一个标签 = 一个会话**：会话 = FileManager（文档内容/路径/脏标志/编码/缓存/历史）
-//     + EditorWidget（那个标签的编辑器）。两者放在 m_sessions 里配对。
-//   * **预览只有一个**：所有标签共用同一个 QWebEngineView 和同一个渲染管线。
-//     切标签时把新文档的内容推过去；只有"文档目录变了"才重新加载模板，
-//     否则页面不重载、不会闪一下白屏。
-//   * 标签页本身的增删/排序/关闭确认机制在 TabManager 里；主窗口通过
-//     setCloseConfirmHandler() 注入"要不要保存"的对话框（策略留在界面层）。
+// 整体布局（.ui 里描述结构，行为在代码里）：
 //
-// 数据流（和单文档时代一样，只是"当前会话"而已）：
+//   ┌──────────────────────────────────────────────────────────────┐
+//   │ 菜单栏：文件 / 编辑 / 视图 / 帮助                              │
+//   │ 工具栏：新建 打开 保存 | 撤销 重做 | 预览 主题                  │
+//   ├──────────┬───────────────────────────────────────────────────┤
+//   │ 文件      │  中央区：EditorWorkbench（左：多标签编辑器        │
+//   │ （左侧     │                        右：共享预览）             │
+//   │  停靠面板）│                                                   │
+//   ├──────────┴───────────────────────────────────────────────────┤
+//   │ 全文搜索（底部停靠面板，默认隐藏）                             │
+//   ├──────────────────────────────────────────────────────────────┤
+//   │ 状态栏：行 x 列 y · 字符数 · 修改状态 · 路径 · 缓存            │
+//   └──────────────────────────────────────────────────────────────┘
+//
+// 两块侧边面板都是 QDockWidget：可以拖到别的停靠区、也可以关掉（视图菜单里能再打开）。
+// 这样做还有个副作用是好的：中央区分屏只剩"编辑器 + 预览"两块，比例不需要照顾第三块。
+//
+// 一个标签 = 一个会话（5.2 之后的结构）：
+//   * 会话 = FileManager（内容/路径/脏标志/编码/缓存/历史）+ EditorWidget（那个标签的编辑器），
+//     两者在 m_sessions 里配对。
+//   * **预览只有一个**：所有标签共用同一个 QWebEngineView 和同一条渲染管线。
+//     切标签只推内容不重载页面（不闪白、不丢滚动位置）。
+//
+// 数据流：
 //   1) 打字 → FileManager::setText() 置脏 → PreviewRenderer::updateContent() → 防抖 300ms → 推给页面
 //   2) 编辑器滚动 → 算出当前顶行 → SyncBridge 发信号 → 预览页里的 JS scrollToLine()
 //   3) 预览被点击 → JS 调 SyncBridge::reportPreviewClick(行号) → 当前标签的光标跳过去
 //   4) 保存 → 按原编码原子写盘 → 打一个历史快照 → 标签上的 * 消失
 //
-// 行号约定：**1 起算**。EditorWidget 内部已经把光标行列换算成 1 起算；
-// 这里只在两处做 0/1 转换（onEditorScrolled 和 onPreviewClicked）。
+// 行号约定：**1 起算**（状态栏显示的和编辑器内部换算好的都是这个约定）。
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -92,6 +107,13 @@ private slots:
     // 主题切换（5.7）：把新主题应用到所有编辑器和预览区（菜单栏等控件由 QSS 自动跟）
     void onThemeChanged(ThemeManager::Theme theme);
 
+    // 查找 / 替换（编辑菜单）：打开非模态的查找对话框，并指向当前标签
+    void onFind();
+    void onReplace();
+
+    // 帮助 → 关于
+    void onAbout();
+
     // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
     void onSearchResultActivated(const QString &filePath, int line);
 
@@ -109,6 +131,8 @@ private:
     void initUi();
     // 菜单/工具栏/状态栏：这些用 .ui 表达不了（快捷键、动作、连接都是代码的事），所以留在代码里
     void initMenuBar();
+    // 「编辑」菜单里的撤销/重做/剪切/复制/粘贴：作用于**当前标签**，可用状态也跟着它走
+    void initEditActions();
     void initToolBar();
     void initStatusBar();
 
@@ -178,6 +202,10 @@ private:
     void updateWindowTitle();
     // 状态栏右侧那行缓存状态（当前标签的缓存：条数 / 命中次数 / 命中率）
     void updateCacheStatus();
+    // 状态栏上的"当前文档"信息：行列、字符数、路径、修改状态。
+    // 汇总成一个函数：这四样东西的刷新时机几乎一样（切标签/打字/保存/光标动），
+    // 分散着更新迟早会漏一处。
+    void updateDocumentStatus();
 
     Ui::MainWindow *ui = nullptr;
 
@@ -200,6 +228,19 @@ private:
     QAction *m_closeTabAction = nullptr;
     QAction *m_nextTabAction = nullptr;
     QAction *m_previousTabAction = nullptr;
+    // ---- 编辑菜单（作用于当前标签）----
+    QAction *m_undoAction = nullptr;
+    QAction *m_redoAction = nullptr;
+    QAction *m_cutAction = nullptr;
+    QAction *m_copyAction = nullptr;
+    QAction *m_pasteAction = nullptr;
+    QAction *m_selectAllAction = nullptr;
+    QAction *m_findAction = nullptr;
+    QAction *m_replaceAction = nullptr;
+    QAction *m_aboutAction = nullptr;  // 帮助 → 关于
+    QAction *m_aboutQtAction = nullptr;
+    QAction *m_togglePreviewAction = nullptr;   // 工具栏：切换预览（显示/仅编辑）
+    QAction *m_darkThemeAction = nullptr;       // 工具栏：切换主题（勾上 = 暗色）
     QAction *m_historyAction = nullptr;
     QAction *m_diffAction = nullptr;
     QAction *m_rollbackAction = nullptr;
@@ -224,8 +265,15 @@ private:
     // 成员活到窗口析构，不会出现"导出还没结束，对象先没了"的情况。
     Exporter m_exporter;
 
-    QLabel *m_cacheLabel = nullptr;   // 状态栏右侧的缓存状态（父对象是状态栏，生命周期归它）
-    QLabel *m_cursorLabel = nullptr;  // 状态栏上的"行 x，列 y"（来自 EditorWidget::cursorMoved）
+    // 查找/替换对话框（非模态，整个窗口只用一个实例）：
+    // 复用同一个实例的好处是"上次搜的词还在"，不用每次重打。
+    FindReplaceDialog m_findDialog;
+
+    QLabel *m_cacheLabel = nullptr;     // 状态栏右侧：当前文档的缓存状态
+    QLabel *m_cursorLabel = nullptr;    // 状态栏：行 x，列 y（来自 EditorWidget::cursorMoved）
+    QLabel *m_charCountLabel = nullptr; // 状态栏：字符数
+    QLabel *m_pathLabel = nullptr;      // 状态栏：当前文件路径（中间省略，可选中复制）
+    QLabel *m_modifiedLabel = nullptr;  // 状态栏：已修改 / 已保存
 };
 
 #endif // MAINWINDOW_H

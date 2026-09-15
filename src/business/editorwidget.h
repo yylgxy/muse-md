@@ -83,6 +83,29 @@ public:
     // 光标在行中间时，会先补一个换行，保证围栏独占一行（否则围栏根本不成立）。
     void insertCodeBlock(const QString &language);
 
+    // ============================ 查找与替换 ============================
+    // 机制放在控件里（而不是放进查找对话框）有两个理由：
+    //   1. 它们全是"对文档的操作"，本质属于编辑器；
+    //   2. 替换的边界情况最容易写错（大小写、环绕、替换文本里又含搜索词……），
+    //      放在这里就能脱离界面单独测。
+
+    // 从光标之后往下找；找不到且 wrap=true 时从头再来一遍（"到底了回到开头"，符合直觉）。
+    // 找到就把那一段选中并滚到可见位置，返回 true。
+    bool findNext(const QString &text, bool caseSensitive = false, bool wrap = true);
+
+    // 同 findNext，但往上找（找不到且 wrap=true 时从文档末尾再来）
+    bool findPrevious(const QString &text, bool caseSensitive = false, bool wrap = true);
+
+    // 替换"当前选中的那一处"：选中内容正好等于 text 时才替换，返回是否真的换了。
+    // （先查找再替换的用法下，这样不会误替换别处。）
+    bool replaceCurrent(const QString &text, const QString &replacement, bool caseSensitive = false);
+
+    // 全文替换，返回替换了几处。整件事包在一个 edit block 里，**一次撤销**就能全退回。
+    int replaceAll(const QString &text, const QString &replacement, bool caseSensitive = false);
+
+    // 数一数全文有几处（给"共 N 处"这类提示用）
+    int countOccurrences(const QString &text, bool caseSensitive = false) const;
+
     // ============================ 纯函数（能单独测）============================
 
     // 输入 opener 时该补上的闭合字符；不是成对字符就返回空字符串。

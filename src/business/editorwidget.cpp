@@ -163,6 +163,141 @@ markdown_editor::core::document::ThemePalette EditorWidget::themePalette() const
 }
 
 // ============================================================================
+// 查找与替换
+// ============================================================================
+
+namespace {
+
+// 查找标志：只有"区分大小写"一个开关（正则查找没做 —— 先把常用的做扎实）
+QTextDocument::FindFlags findFlags(bool caseSensitive)
+{
+    QTextDocument::FindFlags flags;
+    if (caseSensitive) {
+        flags |= QTextDocument::FindCaseSensitively;
+    }
+    return flags;
+}
+
+}  // namespace
+
+bool EditorWidget::findNext(const QString &text, bool caseSensitive, bool wrap)
+{
+    if (text.isEmpty()) {
+        return false;
+    }
+
+    // 从当前光标往下找（QTextDocument::find 从给定光标位置开始，不含该位置本身）
+    QTextCursor found = document()->find(text, textCursor(), findFlags(caseSensitive));
+
+    if (found.isNull() && wrap) {
+        // 到底了：从头再找一遍（这样"查找下一个"在最后一处之后会回到第一处）
+        QTextCursor fromStart(document());
+        found = document()->find(text, fromStart, findFlags(caseSensitive));
+    }
+
+    if (found.isNull()) {
+        return false;
+    }
+
+    setTextCursor(found);  // 选中命中处：用户可以接着 Ctrl+C 或者直接打字覆盖
+    ensureCursorVisible();
+    return true;
+}
+
+bool EditorWidget::findPrevious(const QString &text, bool caseSensitive, bool wrap)
+{
+    if (text.isEmpty()) {
+        return false;
+    }
+
+    QTextDocument::FindFlags flags = findFlags(caseSensitive) | QTextDocument::FindBackward;
+    QTextCursor found = document()->find(text, textCursor(), flags);
+
+    if (found.isNull() && wrap) {
+        // 到顶了：从文档末尾再往上找一遍。注意末尾要留一个位置，
+        // 否则从"文档末尾"这个点往回找不到最后一个字符上的匹配。
+        QTextCursor fromEnd(document());
+        fromEnd.movePosition(QTextCursor::End);
+        found = document()->find(text, fromEnd, flags);
+    }
+
+    if (found.isNull()) {
+        return false;
+    }
+
+    setTextCursor(found);
+    ensureCursorVisible();
+    return true;
+}
+
+bool EditorWidget::replaceCurrent(const QString &text, const QString &replacement, bool caseSensitive)
+{
+    if (text.isEmpty()) {
+        return false;
+    }
+
+    const QTextCursor cursor = textCursor();
+    const QString selected = cursor.selectedText();
+    if (selected.isEmpty()) {
+        return false;  // 没选中东西：不知道要替换哪一处（先"查找下一个"再来）
+    }
+
+    const Qt::CaseSensitivity sensitivity = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    if (QString::compare(selected, text, sensitivity) != 0) {
+        return false;  // 选中的不是要找的那个词：不误替换
+    }
+
+    QTextCursor editable = cursor;
+    editable.insertText(replacement);  // 替换动作本身：可撤销
+    return true;
+}
+
+int EditorWidget::replaceAll(const QString &text, const QString &replacement, bool caseSensitive)
+{
+    if (text.isEmpty()) {
+        return 0;
+    }
+
+    const QTextDocument::FindFlags flags = findFlags(caseSensitive);
+    QTextCursor cursor(document());
+    QTextCursor found = document()->find(text, cursor, flags);
+    if (found.isNull()) {
+        return 0;
+    }
+
+    int count = 0;
+    cursor.beginEditBlock();  // 整批替换是一步：用户按一次 Ctrl+Z 应该全部退回
+    while (!found.isNull()) {
+        found.insertText(replacement);
+        ++count;
+        // 从"替换文本之后"继续找。这一点很关键：替换文本里如果又含有搜索词
+        //（比如把 aa 替换成 aaa），从当前位置继续就不会原地打转。
+        found = document()->find(text, found, flags);
+    }
+    cursor.endEditBlock();
+
+    return count;
+}
+
+int EditorWidget::countOccurrences(const QString &text, bool caseSensitive) const
+{
+    if (text.isEmpty()) {
+        return 0;
+    }
+
+    const QTextDocument::FindFlags flags = findFlags(caseSensitive);
+    QTextCursor cursor(document());
+    QTextCursor found = document()->find(text, cursor, flags);
+
+    int count = 0;
+    while (!found.isNull()) {
+        ++count;
+        found = document()->find(text, found, flags);
+    }
+    return count;
+}
+
+// ============================================================================
 // 跳转与插入代码块
 // ============================================================================
 

@@ -19,6 +19,8 @@ add_library(business STATIC
     exporter.cpp
     thememanager.h
     thememanager.cpp
+    findreplacedialog.h
+    findreplacedialog.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。

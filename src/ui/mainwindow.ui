@@ -26,9 +26,7 @@
       <!-- 中央区是一台"工作台"（我们自己的 QSplitter 子类）：左右分屏、三种显示模式、
            以及编辑器与预览之间的双向同步都归它管。.ui 只描述"左边放编辑器容器、
            右边放预览"这个结构，行为都在 EditorWorkbench 里。 -->
-      <!-- 最左边是文件树侧边栏（5.4.1）：显示当前工作目录，双击文件就在标签页里打开。 -->
-      <widget class="FileTreeView" name="fileTree"/>
-      <!-- 中间是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
+      <!-- 左边是多标签管理器（每个标签里是一个 EditorWidget，由 TabManager 在代码里创建）；
            编辑器不在 .ui 里，因为"有几个"是运行期才知道的。 -->
       <widget class="TabManager" name="tabManager">
        <property name="tabsClosable">
@@ -51,15 +49,27 @@
   </widget>
   <widget class="QMenuBar" name="menubar"/>
   <widget class="QStatusBar" name="statusbar"/>
-  <!-- 全文搜索面板（5.5）做成停靠窗口：可以拉宽、可以挪、可以关，
-       默认是隐藏的（菜单「视图 → 全文搜索」或 Ctrl+Shift+F 打开）。
-       放在 dock 里还有个好处：完全不动中央那台三块分屏的比例。 -->
+  <!-- 左侧停靠面板：文件树。
+       做成 QDockWidget 之后它就可以被拖到任意停靠区、也能关掉（菜单「视图 → 文件树」或
+       「显示/隐藏侧边栏」开关）；中央区因此回到"两栏"（编辑器 + 预览），
+       分屏比例也就不再需要照顾第三块。 -->
+  <widget class="QDockWidget" name="fileTreeDock">
+   <property name="windowTitle">
+    <string>文件</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>1</number>
+   </attribute>
+   <widget class="FileTreeView" name="fileTree"/>
+  </widget>
+  <!-- 底部停靠面板：全文搜索（可隐藏）。
+       搜索结果有"文件 / 行号 / 内容"三列，放在底部而不是左右，宽度更够用。 -->
   <widget class="QDockWidget" name="searchDock">
    <property name="windowTitle">
     <string>全文搜索</string>
    </property>
    <attribute name="dockWidgetArea">
-    <number>1</number>
+    <number>4</number>
    </attribute>
    <widget class="SearchPanel" name="searchPanel"/>
   </widget>

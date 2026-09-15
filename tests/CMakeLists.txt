@@ -290,11 +290,28 @@ target_link_libraries(test_thememanager
 )
 add_test(NAME thememanager COMMAND test_thememanager)
 
+# ---------------- 主窗口布局契约测试 ----------------
+# 主窗口没法在自动化测试里实例化（里面有 QWebEngineView，构造就要拉起 Chromium），
+# 所以这个测试改用**结构检查**：读 mainwindow.ui 与 mainwindow.cpp，验证
+#   * 中央控件是 EditorWorkbench；文件树/搜索面板是两个 QDockWidget（一左一底）
+#   * 文件 / 编辑 / 视图 / 帮助 四个菜单以及各自的条目都在
+#   * 工具栏上放了新建/打开/保存/撤销/重做/切换预览/切换主题
+#   * 状态栏有光标 / 字符数 / 路径 / 修改状态
+#   * 每个入口背后都有真的实现函数（不是空菜单）
+# 它是结构性检查、不是渲染检查 ——「点下去长什么样」仍然要人工跑一次 GUI。
+add_executable(test_mainwindowlayout
+    test_mainwindowlayout.cpp
+)
+target_link_libraries(test_mainwindowlayout
+    Qt6::Core
+)
+add_test(NAME mainwindowlayout COMMAND test_mainwindowlayout)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。
