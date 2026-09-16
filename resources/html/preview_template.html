@@ -220,6 +220,21 @@ document.documentElement.setAttribute('data-theme', 'light');
        channel->registerObject("syncBridge", m_bridge);
    这里的 channel.objects.syncBridge 必须和那个字符串**一模一样**。
    ========================================================================= */
+// 内容与块位置的缓存（P0-2 / P0-3）
+// lastHtml：内容没变就跳过整棵 DOM 重建
+// blockOffsets：每个顶层块的纵向位置，滚动时二分查找用（见 ensureBlockOffsets）
+let lastHtml = null;
+let blockOffsets = null;
+
+// 尺寸或图片变化会改变块的高度 → 位置缓存失效
+window.addEventListener('resize', function () {
+    blockOffsets = null;
+});
+document.addEventListener('load', function (event) {
+    if (event.target && event.target.tagName === 'IMG') {
+        blockOffsets = null;
+    }
+}, true);
 let bridge = null;
 
 new QWebChannel(qt.webChannelTransport, function (channel) {
@@ -229,8 +244,10 @@ new QWebChannel(qt.webChannelTransport, function (channel) {
         return;
     }
     // C++ 的信号 → 用 JS 的 .connect() 连上。这就是"编辑器滚动 → 预览滚动"。
+    // C++ 那边已经把一帧内的多次滚动合并过了（P0-2），这里再合并一层：
+    // 用 requestAnimationFrame 保证"每个显示帧最多真正滚一次"。
     bridge.editorScrolled.connect(function (line) {
-        scrollToLine(line);
+        requestScrollToLine(line);
     });
     console.log('WebChannel 已连接: syncBridge');
 });
@@ -246,6 +263,15 @@ new QWebChannel(qt.webChannelTransport, function (channel) {
  */
 function applyContent(html, blockLines) {
     const content = document.getElementById('content');
+
+    // 内容一字不差时**什么都不做**（P0-3 的轻量版，也是 P0-2 的一部分）：
+    // 重建整棵子树会让整页重新布局/重绘、图片重新解码、滚动位置漂移。
+    // 而"内容没变却推一次"在真实使用里很常见（撤销又改回来、主题切换、切标签回来）。
+    if (lastHtml === html) {
+        return;
+    }
+    lastHtml = html;
+
     content.innerHTML = html;
 
     const children = content.children;
@@ -254,6 +280,9 @@ function applyContent(html, blockLines) {
     for (let i = 0; i < count; i++) {
         children[i].setAttribute('data-line', blockLines[i]);
     }
+
+    // 块的位置缓存失效：下次滚动时重新量一次（见 ensureBlockOffsets）
+    blockOffsets = null;
 
     // 块数对不上时不要静默：这通常意味着 C++ 那边的"块扫描"和 md4c 的解析结果不一致，
     // 只影响没被标注的那几个块（点击它们会退回到最近一个已标注的块），不会整体错位。
@@ -264,28 +293,104 @@ function applyContent(html, blockLines) {
 }
 
 /**
+ * 量一次每个顶层块的纵向位置，缓存起来。
+ *
+ * 为什么要缓存：原来 scrollToLine() 每次都遍历所有块去读 data-line（O(块数)），
+ * 然后 scrollIntoView() —— 那个调用会**强制同步布局**。滚动时每帧都这么干一次，
+ * 文档一大就明显卡。现在改成：量一次（一次批量读取，只触发一次布局），
+ * 之后滚动只做一次二分查找 + 一个 scrollTo 赋值。
+ *
+ * 失效时机：内容变了、窗口尺寸变了、图片加载完（图片会改变高度）。
+ */
+function ensureBlockOffsets() {
+    if (blockOffsets !== null) {
+        return blockOffsets;
+    }
+
+    const content = document.getElementById('content');
+    const children = content.children;
+    const offsets = [];
+    const lines = [];
+
+    // 从 content 的顶部算起（加上文档已滚动的距离才是绝对位置）
+    const base = content.getBoundingClientRect().top + window.scrollY;
+    for (let i = 0; i < children.length; i++) {
+        const l = parseInt(children[i].getAttribute('data-line'), 10);
+        if (isNaN(l)) {
+            continue;   // 没标注的块不参与（点击会退回最近一个已标注块，行为一致）
+        }
+        offsets.push(children[i].getBoundingClientRect().top + window.scrollY - base);
+        lines.push(l);
+    }
+
+    blockOffsets = { offsets: offsets, lines: lines, base: base };
+    return blockOffsets;
+}
+
+/**
  * 滚动预览，让"第 line 行"对应的块出现在顶部附近。
  * 由 C++ 的 editorScrolled(line) 信号触发，也可以手动调用调试。
  * @param {number} line 源码行号（1 起算）
  */
 function scrollToLine(line) {
-    const content = document.getElementById('content');
-    let target = null;
+    const cache = ensureBlockOffsets();
+    if (cache.lines.length === 0) {
+        window.scrollTo(0, 0);
+        return;
+    }
 
-    for (const el of content.children) {
-        const l = parseInt(el.getAttribute('data-line'), 10);
-        if (isNaN(l)) { continue; }
-        if (l <= line) {
-            target = el;          // 取"起始行 <= 目标行"的最后一个块
+    // 二分查找：最后一个 data-line <= line 的块（data-line 是递增的）
+    let low = 0;
+    let high = cache.lines.length - 1;
+    let found = -1;
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (cache.lines[mid] <= line) {
+            found = mid;
+            low = mid + 1;
         } else {
-            break;                // data-line 是递增的，超过就不用再看了
+            high = mid - 1;
         }
     }
 
-    if (target) {
-        target.scrollIntoView({ block: 'start', behavior: 'auto' });
+    if (found < 0) {
+        window.scrollTo(0, 0);   // 目标行在第一个块之前 → 回到顶部
+        return;
+    }
+
+    // 直接用 scrollTop 赋值，而不是 scrollIntoView：
+    // scrollIntoView 会强制浏览器立刻做一次布局（滚动时每帧一次就变成性能杀手）。
+    window.scrollTo(0, cache.base + cache.offsets[found]);
+}
+
+/**
+ * 把一帧内的多次滚动合并成一次真正的滚动（P0-2）。
+ * C++ 侧已经合并过一层，这里再按显示帧合并一层：连续滚动时每帧最多滚一次。
+ */
+let pendingScrollLine = null;
+let scrollFrameScheduled = false;
+
+function requestScrollToLine(line) {
+    pendingScrollLine = line;
+    if (scrollFrameScheduled) {
+        return;
+    }
+    scrollFrameScheduled = true;
+
+    const run = function () {
+        scrollFrameScheduled = false;
+        if (pendingScrollLine === null) {
+            return;
+        }
+        const target = pendingScrollLine;
+        pendingScrollLine = null;
+        scrollToLine(target);
+    };
+
+    if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(run);
     } else {
-        window.scrollTo(0, 0);    // 目标行在第一个块之前（或还没标注）→ 回到顶部
+        setTimeout(run, 16);   // 极老的引擎兜底
     }
 }
 
