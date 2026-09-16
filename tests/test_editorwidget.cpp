@@ -10,6 +10,7 @@
 
 #include "editorwidget.h"
 #include "markdownhighlighter.h"  // 要调用 highlighter()->rehighlight()，需要完整类型
+#include "themepalette.h"         // 外观检查要比对 ThemePalette 里的颜色
 
 #include <QApplication>
 #include <QElapsedTimer>
@@ -31,6 +32,8 @@
 // EditorWidget 是全局命名空间的类（理由见 editorwidget.h），所以这里不需要 using。
 
 namespace {
+
+using markdown_editor::core::document::ThemePalette;
 
 int g_fail = 0;
 
@@ -850,6 +853,26 @@ int main(int argc, char *argv[])
         check(counted.editorFrameSummary().frames >= 1,
               QStringLiteral("帧统计: 重绘之后编辑区记到了帧"),
               QStringLiteral("%1 帧").arg(counted.editorFrameSummary().frames));
+    }
+
+    // ============================ Q. 编辑器不要原生边框（回归）============================
+    //
+    // 真实 bug（用户看到"编辑区有个白框"）：为了性能把 `QPlainTextEdit { border: none; }`
+    // 这条 QSS 规则拿掉之后，边框就交回平台样式了 —— Windows 样式会给文本框画一圈浅色边框，
+    // 暗色主题下尤其明显。
+    // 正解是让控件本身没有边框（setFrameShape(NoFrame)），而不是再用 QSS 去压它。
+    {
+        EditorWidget editor;
+        check(editor.frameShape() == QFrame::NoFrame,
+              QStringLiteral("外观: 编辑器没有原生边框（setFrameShape(NoFrame)）"),
+              QStringLiteral("frameShape=%1").arg(static_cast<int>(editor.frameShape())));
+        check(editor.frameWidth() == 0, QStringLiteral("外观: 边框宽度为 0"),
+              QStringLiteral("%1 px").arg(editor.frameWidth()));
+
+        // 顺带钉住"颜色确实来自 palette"（这条也是那一轮改动的一部分）
+        check(editor.palette().color(QPalette::Base) == ThemePalette::light().editorBackground,
+              QStringLiteral("外观: 底色来自 QPalette"),
+              editor.palette().color(QPalette::Base).name());
     }
 
     // ============================ L. 语法高亮器已绑定 ============================

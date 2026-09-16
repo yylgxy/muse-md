@@ -98,6 +98,13 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     // ---- 2. 行号栏 ----
     m_lineNumberArea = new LineNumberArea(this);
 
+    // 编辑器不要边框。
+    // 以前这靠 QSS 里的 `QPlainTextEdit { border: none; }` 实现；那条规则为了性能被拿掉之后
+    // （给控件写 QSS 会让每次重绘都走 QStyleSheetStyle），边框就交回平台样式了 ——
+    // Windows 样式会给文本框画一圈浅色边框，暗色主题下看着就是"编辑器周围有个白框"。
+    // 正解是让**控件本身**没有边框，而不是再用 QSS 去压它。
+    setFrameShape(QFrame::NoFrame);
+
     // ---- 2b. 帧统计（性能排查）----
     // 滚动时每帧都会走到 updateLineNumberArea，那里只记一个时间戳；
     // 这里负责"停手之后报一次"。300ms 的静默判定和"输入停止才渲染"是同一个思路：
@@ -109,7 +116,8 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     // ---- 3. 主题配色 ----
     // 颜色来自 ThemePalette（亮色起步）：行号栏和高亮器都用同一份，
     // 切主题时 ThemeManager 会推进来新的一份（见 setThemePalette）。
-    // 编辑器控件的背景/文字色不在这里设 —— 那是 QSS 的事（resources/styles/*.qss）。
+    // 编辑器控件的背景/文字色/选中色都通过 QPalette 设置（见 setThemePalette），
+    // **不走 QSS** —— 给控件写 QSS 会让每次重绘都走 QStyleSheetStyle 那条更慢的路径。
     setThemePalette(ThemePalette::light());
 
     applyIndentWidth();

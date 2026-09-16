@@ -7,8 +7,9 @@
 
    底色用 #0d1117（带一点蓝的深灰）而不是纯黑：纯黑配亮色文字在 LCD 上
    会有明显的拖影和刺眼感，这是常见护眼做法。
-
-   ★ QPlainTextEdit 的底色/文字色必须和 ThemePalette::dark() 一致（见 light.qss 的说明）。
+   ★ 编辑器（QPlainTextEdit）**故意不在这个文件里上色**：
+     它的底色/字色/选中色由 ThemePalette::dark() 通过 QPalette 设置，
+     边框由控件自己 setFrameShape(QFrame::NoFrame) 去掉 —— 原因见 light.qss 顶部的说明。
    ============================================================================ */
 
 QWidget {

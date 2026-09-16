@@ -201,6 +201,16 @@ int main(int argc, char *argv[])
         // 但编辑器**内部**的滚动条还是要靠 QSS 上色的（那部分没有性能问题：它只是滚动条）
         check(lightCss.contains(QStringLiteral("QScrollBar")) && darkCss.contains(QStringLiteral("QScrollBar")),
               QStringLiteral("性能: 滚动条样式还在（只把编辑器本体从 QSS 里拿掉）"));
+
+        // 回归：删掉 QSS 里的 `border: none` 之后，边框交回平台样式了 ——
+        // 用户看到的就是"编辑区周围一个白框"。所以这条契约必须钉住：
+        // **QSS 里不写边框，控件自己也不许有边框**（见 EditorWidget 构造函数）。
+        {
+            EditorWidget framed;
+            check(framed.frameShape() == QFrame::NoFrame && framed.frameWidth() == 0,
+                  QStringLiteral("外观: 编辑器没有原生边框（否则会出现白框）"),
+                  QStringLiteral("frameShape=%1").arg(static_cast<int>(framed.frameShape())));
+        }
     }
 
     // ============================ C. 配色质量（两套互不相同 + 对比度）============================

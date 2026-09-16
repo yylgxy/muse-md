@@ -7,9 +7,13 @@
      QSS 能把整棵控件树一次说清楚，QPalette 只用来兜住 QSS 覆盖不到的地方
     （比如 QFileDialog 里的原生部件）。
 
-   ★ 这里的编辑器底色/文字色必须和 ThemePalette::light() 完全一致 ——
-     语法高亮的颜色来自那份配色表，QSS 管的是背景和"控件外观"，
-     两处不一致就会出"文字是深色但背景还是深色"这种事。test_thememanager 会盯着。
+   ★ 编辑器（QPlainTextEdit）**故意不在这个文件里上色**：
+     它的底色/字色/选中色由 ThemeManager::editorPalette() 提供的 QPalette 设置
+     （EditorWidget::setThemePalette 里 setPalette），边框由控件自己的
+     setFrameShape(QFrame::NoFrame) 去掉。
+     原因：给控件写 QSS 会让它每次重绘都走 QStyleSheetStyle 那条更慢的路径，
+     而编辑器是整窗里重绘最频繁的控件（滚动/打字时每帧都要交这个税）。
+     test_thememanager 会检查"这里不再有 QPlainTextEdit 规则"。
    ============================================================================ */
 
 QWidget {
