@@ -4,6 +4,9 @@ build-*/
 out/
 cmake-build-*/
 
+# ---- 发布产物（tools\package_release.ps1 的输出）----
+# 绿色版目录与 zip 是**发布附件**，通过 GitHub Release 上传，不进版本库
+dist/
 # ---- CMake 生成物 ----
 CMakeCache.txt
 CMakeFiles/
