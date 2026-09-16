@@ -4,6 +4,7 @@
 #include <QList>
 #include <QSplitter>
 #include <QString>
+#include <QTimer>  // m_scrollCoalesce 是值成员，需要完整类型（前向声明不够）
 
 class EditorWidget;
 class QWebEngineView;
@@ -90,6 +91,11 @@ public:
     // 有没有"欠着还没推"的内容（主要给测试用，界面不需要关心）
     bool hasDeferredContent() const;
 
+    // 有没有"欠着还没发的滚动同步"（主要给测试用）。
+    // 滚动是高频事件：一次滚轮手势能产生上百个 valueChanged，
+    // 每个都发一次 WebChannel 消息 + 让网页那边重新算一遍位置，就会明显卡（优化项 P0-2）。
+    bool hasPendingScrollSync() const;
+
     QString previewBaseDir() const;
 
 signals:
@@ -102,7 +108,8 @@ private:
     void applyViewMode(ViewMode mode);
     void rememberSplitSizes();     // 切到单栏之前记住比例
     void restoreSplitSizes();      // 切回分屏时恢复比例
-    void syncScrollToPreview();    // 编辑器滚动 → 预览滚动
+    void syncScrollToPreview();    // 编辑器滚动 → 记下待发（不直接发，见下）
+    void sendScrollToPreview();    // 真正把待发的滚动位置发给预览（按帧合并之后的出口）
 
     // 现在要不要"先记下不推送"（见 showContent 的说明）
     bool shouldDeferContent() const;
@@ -120,6 +127,11 @@ private:
     ViewMode m_mode = ViewMode::Split;
     QList<int> m_savedSizes;               // 单栏模式下暂存的分屏比例
     QString m_previewBaseDir;              // 当前预览用的 baseUrl 目录
+
+    // 滚动同步的合并（P0-2）：把一帧内的多次滚动合并成一次发送
+    QTimer m_scrollCoalesce;               // 单次触发，约一帧（16ms）
+    int m_pendingScrollLine = -1;          // 待发的最顶可见行（-1 = 没有欠着的）
+    int m_lastSentScrollLine = -1;         // 上一次真正发出去的行（相同就不用再发）
 
     // 被推迟的那次内容推送（只有 m_hasPendingContent 为真时才有意义）
     bool m_hasPendingContent = false;

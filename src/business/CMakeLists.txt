@@ -23,6 +23,8 @@ add_library(business STATIC
     findreplacedialog.cpp
     sessionstate.h
     sessionstate.cpp
+    editorsyncscheduler.h
+    editorsyncscheduler.cpp
 )
 
 # 让链接 business 的模块能直接 #include "editorwidget.h"。

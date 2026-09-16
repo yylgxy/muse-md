@@ -7,6 +7,7 @@
 
 #include <QScrollBar>
 #include <QTextDocument>
+#include <QTimer>  // 滚动同步的按帧合并（P0-2）
 #include <QWebChannel>
 #include <QWebEnginePage>
 #include <QWebEngineView>
@@ -44,6 +45,15 @@ EditorWorkbench::EditorWorkbench(QWidget *parent) : QSplitter(parent)
 
     // ---- 内容刚推给页面 → 页面里的块是新的，滚动位置要重新对齐一次 ----
     connect(m_renderer, &PreviewRenderer::contentRendered, this, &EditorWorkbench::syncScrollToPreview);
+
+    // ---- 滚动同步的按帧合并（P0-2）----
+    // 滚动是高频事件：一次滚轮手势能产生上百个 valueChanged。原来每个都立刻发一条
+    // WebChannel 消息，网页那边再线性扫一遍块列表 + scrollIntoView（强制布局），
+    // 结果就是"滚动明显发黏"。这里改成：滚动只记下"最顶可见行"，
+    // 16ms（约一帧）之后合并发一次；行号没变就干脆不发。
+    m_scrollCoalesce.setSingleShot(true);
+    m_scrollCoalesce.setInterval(16);
+    connect(&m_scrollCoalesce, &QTimer::timeout, this, &EditorWorkbench::sendScrollToPreview);
 }
 
 bool EditorWorkbench::setup(QWidget *editorSide, QWidget *previewSide)
@@ -225,7 +235,11 @@ void EditorWorkbench::setCurrentEditor(EditorWidget *editor)
         connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, &EditorWorkbench::syncScrollToPreview);
         // 这个编辑器进出"大文档快速模式"时，预览的推送要跟着恢复/暂停（7.2）
         connect(m_editor, &EditorWidget::fastModeChanged, this, [this](bool) { pushDeferredContent(); });
-        syncScrollToPreview();  // 刚切过来先对齐一次，不然预览还停在上一个文档的位置
+        // 刚切过来先对齐一次，不然预览还停在上一个文档的位置。
+        // 这一次**立刻发**（不等一帧）：用户点了标签，视觉上就该马上对上。
+        m_lastSentScrollLine = -1;  // 换了文档，行号不能沿用上一个文档的"已发送"记录
+        syncScrollToPreview();
+        sendScrollToPreview();
     }
 
     // 换了编辑器：新文档可能不是大文档 —— 把之前欠下的内容补推一次（7.2）
@@ -243,11 +257,47 @@ void EditorWorkbench::syncScrollToPreview()
         return;
     }
 
+    // 预览看不见的时候（仅编辑模式）不用同步 —— 没人看，省掉整条链路。
+    // 和内容推送的推迟是同一个道理（见 shouldDeferContent）。
+    if (m_previewSide != nullptr && m_previewSide->isHidden()) {
+        return;
+    }
+
     // 当前最顶可见行 = 视口左上角对应的文本块。
     // 注意：QPlainTextEdit::firstVisibleBlock() 是 protected 的，外部调不到，
     // 所以走 cursorForPosition()（它接受的是视口坐标）。
-    const int blockNumber = m_editor->cursorForPosition(QPoint(0, 0)).blockNumber();
-    m_bridge->reportEditorScroll(blockNumber + 1);  // +1：换成 1 起算的人类行号
+    const int line = m_editor->cursorForPosition(QPoint(0, 0)).blockNumber() + 1;  // +1：换成人类行号
+
+    if (line == m_lastSentScrollLine && m_pendingScrollLine < 0) {
+        return;  // 这一帧的位置和上次发过的一样：没有新信息，不用发
+    }
+
+    m_pendingScrollLine = line;  // 只记下最新值：中间那些值没人需要
+    if (!m_scrollCoalesce.isActive()) {
+        m_scrollCoalesce.start();  // 本帧内的后续滚动都会被合并进这一次发送
+    }
+}
+
+void EditorWorkbench::sendScrollToPreview()
+{
+    if (m_pendingScrollLine < 0 || m_bridge == nullptr) {
+        return;
+    }
+
+    const int line = m_pendingScrollLine;
+    m_pendingScrollLine = -1;
+
+    if (line == m_lastSentScrollLine) {
+        return;  // 合并之后发现和上次一样：不发（省一次跨进程往返）
+    }
+
+    m_lastSentScrollLine = line;
+    m_bridge->reportEditorScroll(line);
+}
+
+bool EditorWorkbench::hasPendingScrollSync() const
+{
+    return m_pendingScrollLine >= 0 || m_scrollCoalesce.isActive();
 }
 
 void EditorWorkbench::showContent(const QString &markdown, const QString &baseDir, bool forceReload)

@@ -742,6 +742,48 @@ int main(int argc, char *argv[])
               QStringLiteral("悬停: 两头都对得上（上边界 1、下边界最后一行）"));
     }
 
+    // ============================ O. characterCount()：O(1) 且与 toPlainText().size() 等价 ============================
+    //
+    // 性能优化 P0-1 的基础：状态栏的"字符 N"跟着每次按键刷新，
+    // 用 toPlainText().size() 等于每敲一个字就把整篇文档深拷贝一遍。
+    // 换成 O(1) 的 characterCount() 之后**显示的语义必须一模一样**，
+    // 所以这里逐个文档类型把等价关系钉住。
+    {
+        const QStringList samples = {
+            QString(),                                 // 空文档
+            QStringLiteral("a"),                       // 一个字符
+            QStringLiteral("Hello, world"),            // 单行
+            QStringLiteral("第一行\n第二行"),           // 两行中文
+            QStringLiteral("line1\nline2\nline3\n"),   // 末尾带换行
+            QStringLiteral("\n\n\n"),                  // 全是空行
+            QStringLiteral("emoji 😀 与组合字符 é"),    // 非 BMP / 组合字符
+            QStringLiteral("很长的一行").repeated(500), // 长单行
+        };
+
+        for (const QString &sample : samples) {
+            EditorWidget editor;
+            editor.setPlainText(sample);
+            const int fast = editor.characterCount();
+            const int slow = editor.toPlainText().size();
+            const QString label = sample.isEmpty()
+                                      ? QStringLiteral("空文档")
+                                      : sample.left(6).replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+            check(fast == slow,
+                  QStringLiteral("字符数: characterCount() 与 toPlainText().size() 一致（%1）").arg(label),
+                  QStringLiteral("快=%1 慢=%2").arg(fast).arg(slow));
+        }
+
+        // 打字之后也要立刻正确
+        EditorWidget editor;
+        editor.setPlainText(QStringLiteral("abc"));
+        editor.moveCursor(QTextCursor::End);
+        editor.insertPlainText(QStringLiteral("de"));
+        check(editor.characterCount() == 5, QStringLiteral("字符数: 打字之后立刻是对的"),
+              QString::number(editor.characterCount()));
+        check(editor.characterCount() == editor.toPlainText().size(),
+              QStringLiteral("字符数: 打字之后仍与 toPlainText().size() 一致"));
+    }
+
     // ============================ L. 语法高亮器已绑定 ============================
     {
         EditorWidget editor;

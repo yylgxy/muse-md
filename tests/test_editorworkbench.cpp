@@ -18,6 +18,7 @@
 #include "tabmanager.h"
 
 #include <QApplication>
+#include <QElapsedTimer>  // spin()：等一帧
 #include <QLabel>
 #include <QList>
 #include <QScrollBar>
@@ -43,6 +44,17 @@ void check(bool ok, const QString &what, const QString &detail = QString())
     std::printf("\n");
     if (!ok) {
         ++g_fail;
+    }
+}
+
+// 转 ms 毫秒事件循环。滚动同步是"按帧合并"的（见 EditorWorkbench::syncScrollToPreview），
+// 所以要等一帧之后才能看到它真的发出去了。
+void spin(int ms)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     }
 }
 
@@ -140,8 +152,8 @@ int main(int argc, char *argv[])
             longText << QStringLiteral("第 %1 行").arg(i);
         }
         first->setPlainText(longText.join(QLatin1Char('\n')));
-        second->setPlainText(QStringLiteral("另一个文档"));
-        first->resize(400, 100);
+        // 第二个编辑器也给一份多行内容：滚动位置要真的会变，才测得出"滚动有反应"
+        second->setPlainText(longText.join(QLatin1Char('\n')));        first->resize(400, 100);
         second->resize(400, 100);
 
         // ---- 编辑器滚动 → 桥发信号 ----
@@ -153,10 +165,19 @@ int main(int argc, char *argv[])
         workbench.setCurrentEditor(first);
         check(workbench.currentEditor() == first, QStringLiteral("同步: setCurrentEditor 记住了当前编辑器"));
 
-        // 强制一个滚动范围（窗口没显示时滚动条未必有范围），再滚动它
+        // ★ 7.2/P0-2 之后滚动的行为：**按帧合并**（一帧内最多发一次），
+        // 所以断言之前要转一下事件循环。这里顺便把"合并"本身也测了。
         first->verticalScrollBar()->setRange(0, 50);
-        first->verticalScrollBar()->setValue(20);
-        check(!scrolledLines.isEmpty(), QStringLiteral("同步: 编辑器滚动 → 桥发了 editorScrolled"),
+
+        // 连续滚 10 次（都在同一帧里）：应该只发 1 次，而不是 10 次
+        scrolledLines.clear();
+        for (int i = 0; i < 10; ++i) {
+            first->verticalScrollBar()->setValue(i * 5);
+        }
+        check(workbench.hasPendingScrollSync(), QStringLiteral("同步: 滚动之后有一次「待发」的同步"));
+        spin(40);
+        check(scrolledLines.size() == 1,
+              QStringLiteral("同步: ★同一帧内连滚十次只发一次（原来是十次跨进程往返）"),
               QStringLiteral("%1 次").arg(scrolledLines.size()));
 
         if (!scrolledLines.isEmpty()) {
@@ -169,15 +190,25 @@ int main(int argc, char *argv[])
                   QStringLiteral("同步: 行号落在文档范围内"), QString::number(scrolledLines.last()));
         }
 
+        // 位置没变时不必再发（省一次往返）
+        scrolledLines.clear();
+        first->verticalScrollBar()->setValue(first->verticalScrollBar()->value());
+        spin(40);
+        check(scrolledLines.isEmpty(), QStringLiteral("同步: 滚动位置没变就不发（不产生无意义的往返）"));
+
         // ---- 切到另一个编辑器后，旧的那个不该再带动预览 ----
         workbench.setCurrentEditor(second);
+        spin(40);
         scrolledLines.clear();
         first->verticalScrollBar()->setValue(40);
+        spin(40);
         check(scrolledLines.isEmpty(), QStringLiteral("同步: ★切走之后，后台编辑器的滚动不再带动预览"));
 
-        second->verticalScrollBar()->setRange(0, 5);  // 让它的滚动条也有范围
-        second->verticalScrollBar()->setValue(1);
-        check(!scrolledLines.isEmpty(), QStringLiteral("同步: 当前编辑器滚动照常有反应"));
+        second->verticalScrollBar()->setRange(0, 50);  // 让它的滚动条也有范围
+        second->verticalScrollBar()->setValue(30);     // 滚到一个和"刚切过来"不同的位置
+        spin(40);
+        check(!scrolledLines.isEmpty(), QStringLiteral("同步: 当前编辑器滚动照常有反应"),
+              QStringLiteral("%1 次").arg(scrolledLines.size()));
 
         // ---- 预览点击 → 编辑器跳行（桥的槽本来就是给 JS 调用的，这里直接调）----
         workbench.setCurrentEditor(first);

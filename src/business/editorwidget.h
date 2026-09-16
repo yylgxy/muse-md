@@ -63,6 +63,13 @@ public:
     // 公开出来也让这条映射能被单独测 —— 它和绘制行号用的是同一套几何计算。
     int lineNumberAtY(int y) const;
 
+    // 文档的字符数 —— **等于 toPlainText().size()，但是 O(1)**。
+    // 为什么专门开这一个：状态栏的"字符 N"会跟着每次按键刷新，
+    // 用 toPlainText().size() 等于每敲一个字就把整篇文档深拷贝一遍
+    //（几十万字符的文档上，这笔开销是打字"发黏"的主因之一）。
+    // QTextDocument::characterCount() 多算了最后一个块的块结束符，所以这里减 1。
+    int characterCount() const;
+
     int indentWidth() const;
     void setIndentWidth(int spaces);
 

@@ -417,6 +417,13 @@ void EditorWidget::contextMenuEvent(QContextMenuEvent *event)
 // 跳转与插入代码块
 // ============================================================================
 
+int EditorWidget::characterCount() const
+{
+    // QTextDocument::characterCount() 把"最后一个块的块结束符"也算进去了，
+    // 所以比 toPlainText().size() 大 1（测试里逐个文档类型钉住了这个等价关系）。
+    return qMax(0, document()->characterCount() - 1);
+}
+
 int EditorWidget::lineNumberAtY(int y) const
 {
     // 和绘制行号用同一套几何算法（firstVisibleBlock / blockBoundingGeometry / contentOffset）：

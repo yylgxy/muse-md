@@ -9,6 +9,7 @@
 #include "exporter.h"           // 5.6：导出器是整个窗口的一个成员（按值持有）
 #include "filemanager.h"        // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "findreplacedialog.h"  // 查找/替换对话框是窗口的一个成员（按值持有）
+#include "editorsyncscheduler.h"  // 性能（P0-1）：编辑器 → 文档的延迟同步节流器
 #include "recentfiles.h"        // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
 #include "sessionstate.h"       // 6.2：窗口/会话记忆（静态工具类）
 #include "thememanager.h"       // 5.7：主题（槽签名里用它的枚举）
@@ -238,6 +239,22 @@ private:
     // 汇总成一个函数：这四样东西的刷新时机几乎一样（切标签/打字/保存/光标动），
     // 分散着更新迟早会漏一处。
     void updateDocumentStatus();
+
+    // "这个文档算不算有未保存的修改"：文档管理器说改了 **或者** 编辑器自己说改了。
+    // 为什么两个一起看：打字之后文档管理器要等 150ms 才被同步（见 m_syncScheduler），
+    // 而标签上的 * 应该立刻出现 —— 编辑器自己的 modified 标志是 O(1) 的，正好补上这一段。
+    bool isSessionModified(FileManager *files, EditorWidget *editor) const;
+
+    // 编辑器内容 → 文档管理器：真正做"整篇拷贝 + 比较"的地方。
+    // 只由 m_syncScheduler 在停手之后调用（以及保存前被显式调用）。
+    void syncEditorIntoFiles(EditorWidget *editor);
+
+    // ============================ 性能（P0）============================
+    // 编辑器内容的延迟同步。原来每次按键都做一次 toPlainText()（整篇深拷贝）+
+    // 全串比较 —— 大文档上打字会明显发黏。现在改成：打字只标记（O(1)），
+    // 停手 150ms 后统一同步；保存/关闭/切标签/导出前会先 flushAll()，
+    // 所以绝不会"保存到旧内容"。
+    EditorSyncScheduler m_syncScheduler;
 
     // ============================ 启动与性能（7.2）============================
     // 构造函数只做"让窗口能出现"的那部分；文件树开始监听目录、恢复上次会话

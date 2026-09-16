@@ -102,6 +102,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     createSession();
     updateWindowTitle();
 
+    // ---- 性能：编辑器内容的延迟同步（P0-1）----
+    // 打字时 onEditorTextChanged 只调用 markDirty()（O(1)），真正的
+    // "toPlainText() + setText" 在这里、而且只在停手 150ms 之后做一次。
+    m_syncScheduler.setSyncHandler([this](EditorWidget *editor) { syncEditorIntoFiles(editor); });
+    m_syncScheduler.setDelay(EditorSyncScheduler::kDefaultDelayMs);
+
     // ---- 拖拽打开（6.2）----
     // 主窗口接受拖放：把 .md 从资源管理器拖进来就能打开（实现在 dragEnterEvent/dropEvent）
     setAcceptDrops(true);
@@ -599,13 +605,14 @@ void MainWindow::updateDocumentStatus()
     }
 
     if (m_charCountLabel != nullptr) {
-        const int chars = editor->toPlainText().size();
+        // O(1)：别用 toPlainText().size()（那会把整篇文档拷一遍，而这里跟着每次按键跑）
+        const int chars = editor->characterCount();
         const int lines = editor->document()->blockCount();
         m_charCountLabel->setText(QStringLiteral("字符 %1 · 行 %2").arg(chars).arg(lines));
     }
 
     if (m_modifiedLabel != nullptr) {
-        const bool modified = files->isModified();
+        const bool modified = isSessionModified(files, editor);
         m_modifiedLabel->setText(modified ? QStringLiteral("● 未保存") : QStringLiteral("○ 已保存"));
         m_modifiedLabel->setStyleSheet(modified ? QStringLiteral("color: #b8860b;") : QString());
         m_modifiedLabel->setToolTip(modified ? QStringLiteral("有未保存的修改（Ctrl+S 保存）")
@@ -748,7 +755,8 @@ void MainWindow::updateTabLabel(FileManager *files)
     TabManager::TabInfo info;
     info.fileName = files->fileName();  // 没有路径时它会返回"未命名"
     info.filePath = files->filePath();
-    info.modified = files->isModified();
+    // 用合成判断：同步还没跑（打字后 150ms 内）也要能看出"有未保存的修改"
+    info.modified = isSessionModified(files, editor);
     ui->tabManager->updateTab(ui->tabManager->indexOf(editor), info);
 }
 
@@ -774,6 +782,9 @@ void MainWindow::removeSession(EditorWidget *editor)
     if (files == nullptr) {
         return;
     }
+    // 先把它从"待同步"名单里摘掉：编辑器马上要被销毁了，
+    // 定时器到点时不该再去碰它（QPointer 也能兜住，但这里是更明确的表达）。
+    m_syncScheduler.forget(editor);
     m_sessions.remove(editor);
     delete files;  // 立刻回收：关掉的标签不该继续占着内容缓存和历史对象
 }
@@ -951,8 +962,11 @@ bool MainWindow::saveSession(FileManager *files, EditorWidget *editor)
         return false;
     }
 
-    // 保证管理器里是最新内容（正常打字时 setText 已经同步过，这里是保险）
+    // 保证管理器里是最新内容：这里**显式**同步一次（不依赖节流器到点），
+    // 然后把编辑器从"待同步"名单里摘掉 —— 内容已经在管理器里了，不必再同步一次。
     files->setText(editor->toPlainText());
+    editor->document()->setModified(false);
+    m_syncScheduler.forget(editor);
 
     if (!files->hasFilePath()) {
         return saveSessionAs(files, editor);  // 新文档还没有路径 → 走另存为
@@ -991,6 +1005,8 @@ bool MainWindow::saveSessionAs(FileManager *files, EditorWidget *editor)
     }
 
     files->setText(editor->toPlainText());
+    editor->document()->setModified(false);
+    m_syncScheduler.forget(editor);  // 已经同步过了，别再让节流器做一遍
 
     QString error;
     if (!files->saveFileAs(path, &error)) {
@@ -1029,13 +1045,41 @@ void MainWindow::onEditorTextChanged(EditorWidget *editor)
         return;
     }
 
-    // 内容真的变了才继续往下走：setText() 在"内容没变"时返回 false
-    // （例如打开文件时 setPlainText 带来的那一次 textChanged）
-    if (!files->setText(editor->toPlainText())) {
+    // ★ 性能（P0-1）：这里**不再**做 files->setText(editor->toPlainText())。
+    // toPlainText() 会把整篇文档深拷贝一遍、setText 还要跟旧内容全串比较一遍，
+    // 而这段代码在**每次按键**都会跑 —— 几十万字符的文档上，打字就是被这笔钱拖慢的。
+    // 现在只标记"这个编辑器脏了"（O(1)），交给节流器在停手后统一同步一次；
+    // 保存/关闭/切标签/导出之前会 flush 一次，所以不会出现"保存到旧内容"。
+    m_syncScheduler.markDirty(editor);
+
+    // 标签上的 * 要**立刻**出现：用编辑器自己的 modified 标志判断（O(1)），
+    // 不等那次延迟同步（见 isSessionModified 的说明）。
+    updateTabLabel(files);
+
+    // 预览的推送不在这里做 —— 它跟着"同步完成"走（见 syncEditorIntoFiles）：
+    // 那时候文档管理器里的内容才是最新的，而且渲染管线自己还有 300ms 防抖。
+    updateWindowTitle();
+    updateDocumentStatus();  // 字符数 / 行数 / 修改状态都是随打字变的
+}
+
+// 编辑器内容 → 文档管理器（由节流器在停手之后调用；保存前也会被显式调用）。
+void MainWindow::syncEditorIntoFiles(EditorWidget *editor)
+{
+    FileManager *files = filesFor(editor);
+    if (files == nullptr || editor == nullptr) {
         return;
     }
 
-    updateTabLabel(files);  // 标签上的 * 立刻出现
+    // 内容真的变了才继续往下走：setText() 在"内容没变"时返回 false
+    //（被撤销回原样、或者打开文件时 setPlainText 带来的那一次 textChanged）
+    if (!files->setText(editor->toPlainText())) {
+        // 内容没变：编辑器那边的"待同步"标记清掉就行
+        editor->document()->setModified(false);
+        return;
+    }
+
+    // 同步完了：编辑器的 modified 标记复位，之后的"是否未保存"以文档管理器为准
+    editor->document()->setModified(false);
 
     // 只有当前标签的改动才推到预览：别的标签改内容（比如程序自己填充）不该抢走预览
     if (editor == currentEditor()) {
@@ -1044,14 +1088,28 @@ void MainWindow::onEditorTextChanged(EditorWidget *editor)
         ui->workbench->renderer()->updateContent(files->text());
     }
 
+    updateTabLabel(files);
     updateWindowTitle();
-    updateDocumentStatus();  // 字符数 / 行数 / 修改状态都是随打字变的
+    updateDocumentStatus();
+}
+
+bool MainWindow::isSessionModified(FileManager *files, EditorWidget *editor) const
+{
+    if (files != nullptr && files->isModified()) {
+        return true;
+    }
+    // 编辑器自己说改过 = "还没被同步进文档管理器的那部分改动"
+    return editor != nullptr && editor->document() != nullptr && editor->document()->isModified();
 }
 
 // ============================ 标签切换 ============================
 
 void MainWindow::onCurrentTabChanged(EditorWidget *editor)
 {
+    // ★ 切标签之前先同步：离开的这个标签之后可能被保存/关闭，
+    // 那时文档管理器里必须是它的最新内容（否则会写盘一个旧版本）。
+    m_syncScheduler.flushAll();
+
     if (editor == nullptr) {
         // 所有标签都被关掉了：立刻补一个干净的新标签。
         // 这样"界面上永远有一个编辑器"这条不变式一直成立，后面所有代码都能少写判空。
@@ -1285,6 +1343,11 @@ bool MainWindow::confirmOverwriteIfChanged(FileManager *files)
 // 有未保存的修改时先问一句。返回 false = 用户取消，调用方必须中止当前操作。
 bool MainWindow::maybeSave(FileManager *files)
 {
+    // ★ 先把"欠着的"编辑器内容同步进文档管理器，再问"有没有未保存的修改"。
+    // 少了这一步，刚打完最后一个字就点关闭时，文档管理器还停留在 150ms 前的版本 ——
+    // 用户会看到"明明改了却不提示保存"，那是丢数据的 bug。
+    m_syncScheduler.flushAll();
+
     if (files == nullptr || !files->isModified()) {
         return true;
     }
@@ -1574,7 +1637,9 @@ void MainWindow::exportCurrentDocument(bool asPdf)
 
     // 导出的是"编辑器里现在的内容"，不要求先存盘 —— 但内容要先同步进管理器，
     // 否则会出现"我刚写的这一段没进导出文件"这种最让人意外的结果。
-    files->setText(editor->toPlainText());
+    // 走节流器的 flush（而不是直接 setText）：既能保证内容最新，
+    // 又不会在这里重复实现一遍"同步"的逻辑（脏标志复位、标签刷新都在那一处）。
+    m_syncScheduler.flushAll();
 
     if (asPdf && m_exporter.isPdfRunning()) {
         QMessageBox::information(this,

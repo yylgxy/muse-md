@@ -55,6 +55,27 @@ void check(bool ok, const QString &what, const QString &detail = QString())
     }
 }
 
+// 去掉"整行都是注释"的行（`// …`），以及 **/ 结尾的行 —— 结构检查必须别被注释骗了。
+//
+// 为什么需要它：这一节的检查是"源码里不该再出现某个调用"，
+// 而我们的注释里**恰恰会提到**被替换掉的老写法（"这里不再做 files->setText(editor->toPlainText())"）。
+// 只按整行判断（不去抠行内注释）是有意的：行内的 "//" 可能出现在字符串里
+//（比如 URL），粗暴地按 "//" 截断会把真代码一起吞掉。
+QString withoutCommentLines(const QString &text)
+{
+    QStringList kept;
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith(QStringLiteral("//")) || trimmed.startsWith(QStringLiteral("/*"))
+            || trimmed.startsWith(QStringLiteral("*"))) {
+            continue;
+        }
+        kept << line;
+    }
+    return kept.join(QLatin1Char('\n'));
+}
+
 QString readFile(const QString &path, bool *ok = nullptr)
 {
     QFile file(path);
@@ -654,6 +675,96 @@ int main(int argc, char *argv[])
             check(readFile(root + QStringLiteral("/src/business/tabmanager.cpp"))
                       .contains(QStringLiteral("（有未保存的修改）")),
                   QStringLiteral("悬停: 标签页提示里会说明有没有未保存的修改"));
+        }
+    }
+
+    // ============================ L. 性能优化 P0 的接线 ============================
+    {
+        std::printf("---- L. 性能（P0-1 每键整篇拷贝 / P0-2 滚动同步）----\n");
+
+        const auto bodyOf = [&cpp](const QString &signature) {
+            const int start = cpp.indexOf(signature);
+            if (start < 0) {
+                return QString();
+            }
+            const int end = cpp.indexOf(QStringLiteral("\n}\n"), start);
+            return cpp.mid(start, (end < 0 ? cpp.size() : end) - start);
+        };
+
+        // ---- P0-1：按键路径上不能再有"整篇文档拷贝" ----
+        // 注意：这一组检查针对的是**去掉注释之后**的源码 ——
+        // 注释里会提到被替换掉的老写法（"这里不再做 toPlainText()"），
+        // 不剥掉的话检查会被自己的注释骗过去。
+        const QString code = withoutCommentLines(cpp);
+        const auto bodyOfCode = [&code](const QString &signature) {
+            const int start = code.indexOf(signature);
+            if (start < 0) {
+                return QString();
+            }
+            const int end = code.indexOf(QStringLiteral("\n}\n"), start);
+            return code.mid(start, (end < 0 ? code.size() : end) - start);
+        };
+
+        const QString textChangedBody = bodyOfCode(QStringLiteral("void MainWindow::onEditorTextChanged("));
+        check(!textChangedBody.isEmpty(), QStringLiteral("P0-1: 找到了 onEditorTextChanged 的函数体（去掉注释后）"));
+        check(!textChangedBody.contains(QStringLiteral("toPlainText()")),
+              QStringLiteral("P0-1: ★按键路径里不再有 toPlainText()（那就是每键一遍整篇拷贝）"));
+        check(textChangedBody.contains(QStringLiteral("m_syncScheduler.markDirty(")),
+              QStringLiteral("P0-1: 改成只标记脏（O(1)），交给节流器"));
+
+        const QString statusBody = bodyOfCode(QStringLiteral("void MainWindow::updateDocumentStatus()"));
+        check(!statusBody.contains(QStringLiteral("toPlainText()")),
+              QStringLiteral("P0-1: 状态栏也不再用 toPlainText() 取字符数"));
+        check(statusBody.contains(QStringLiteral("characterCount()")),
+              QStringLiteral("P0-1: 改用 O(1) 的 characterCount()"));
+
+        check(cpp.contains(QStringLiteral("m_syncScheduler.setSyncHandler(")),
+              QStringLiteral("P0-1: 节流器接上了真正的同步函数"));
+        check(cpp.contains(QStringLiteral("void MainWindow::syncEditorIntoFiles(EditorWidget *editor)")),
+              QStringLiteral("P0-1: 同步逻辑集中在 syncEditorIntoFiles"));
+
+        // ---- flush 的三个关键时刻（少一个就会"保存/关闭到旧内容"）----
+        {
+            const int flushCount = cpp.count(QStringLiteral("m_syncScheduler.flushAll();"));
+            check(flushCount >= 3,
+                  QStringLiteral("P0-1: flush 至少在三个关键时刻调用（保存前 / 切标签 / 导出）"),
+                  QStringLiteral("%1 处").arg(flushCount));
+        }
+        check(bodyOf(QStringLiteral("bool MainWindow::maybeSave("))
+                  .contains(QStringLiteral("m_syncScheduler.flushAll()")),
+              QStringLiteral("P0-1: ★关标签/关窗口前先 flush（否则会「改了却不提示保存」）"));
+        check(bodyOf(QStringLiteral("void MainWindow::onCurrentTabChanged("))
+                  .contains(QStringLiteral("m_syncScheduler.flushAll()")),
+              QStringLiteral("P0-1: 切标签前先 flush（离开的标签可能随后被保存）"));
+        check(bodyOf(QStringLiteral("void MainWindow::removeSession("))
+                  .contains(QStringLiteral("m_syncScheduler.forget(")),
+              QStringLiteral("P0-1: 关标签时把它从待同步名单摘掉（不碰已销毁的对象）"));
+        check(cpp.contains(QStringLiteral("bool MainWindow::isSessionModified(")),
+              QStringLiteral("P0-1: 标签上的 * 用合成判断（同步延迟期间也能立刻反映）"));
+
+        // ---- P0-2：滚动同步按帧合并 + 网页侧的块位置缓存 ----
+        {
+            const QString workbench = readFile(root + QStringLiteral("/src/business/editorworkbench.cpp"));
+            check(workbench.contains(QStringLiteral("m_scrollCoalesce.setInterval(16)")),
+                  QStringLiteral("P0-2: 滚动同步按约一帧（16ms）合并"));
+            check(workbench.contains(QStringLiteral("line == m_lastSentScrollLine")),
+                  QStringLiteral("P0-2: 位置没变就不发（省掉无意义的跨进程往返）"));
+            check(workbench.contains(QStringLiteral("m_previewSide->isHidden()"))
+                      && workbench.contains(QStringLiteral("void EditorWorkbench::syncScrollToPreview")),
+                  QStringLiteral("P0-2: 预览隐藏时连合并都不做（没人看）"));
+        }
+        {
+            const QString tmpl = readFile(root + QStringLiteral("/resources/html/preview_template.html"));
+            check(tmpl.contains(QStringLiteral("function ensureBlockOffsets()")),
+                  QStringLiteral("P0-2: 网页侧缓存每个块的位置（滚动时不再逐块测量）"));
+            check(tmpl.contains(QStringLiteral("requestAnimationFrame")),
+                  QStringLiteral("P0-2: 网页侧按显示帧再合并一次"));
+            check(!withoutCommentLines(tmpl).contains(QStringLiteral(".scrollIntoView(")),
+                  QStringLiteral("P0-2: 不再调用 scrollIntoView（它每次都强制同步布局）"));
+            check(tmpl.contains(QStringLiteral("if (lastHtml === html)")),
+                  QStringLiteral("P0-3: 内容一字不差时跳过整棵 DOM 重建"));
+            check(tmpl.contains(QStringLiteral("blockOffsets = null;")),
+                  QStringLiteral("P0-2: 内容/尺寸变化时位置缓存会失效"));
         }
     }
 
