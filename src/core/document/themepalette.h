@@ -26,6 +26,12 @@ public:
     // ---------------- 编辑器底色 ----------------
     QColor editorBackground;
     QColor editorForeground;
+    // 选中文字的背景/前景。原来写在 QSS 里（QPlainTextEdit { selection-background-color }），
+    // 现在改成走 QPalette —— 给控件写 QSS 会让每次重绘都走 QStyleSheetStyle，
+    // 而编辑器是重绘最频繁的控件（详见 EditorWidget::setThemePalette 的说明）。
+    // 数值和原来 QSS 里的一模一样，视觉不变。
+    QColor selectionBackground;
+    QColor selectionForeground;
 
     // ---------------- 行号栏 ----------------
     QColor gutterBackground;

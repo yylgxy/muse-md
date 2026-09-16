@@ -141,13 +141,17 @@ int main(int argc, char *argv[])
         check(lightCss != darkCss, QStringLiteral("资源: 两份内容确实不一样"));
 
         // 控件覆盖：两套都要说到这些……否则切主题会留下没被覆盖的系统色块（看着像没切干净）
+        //
+        // 注意 QPlainTextEdit **不在**这个清单里（性能优化）：编辑器的底色/字色/选中色
+        // 改由 QPalette 提供（ThemeManager::editorPalette → EditorWidget::setThemePalette），
+        // 因为给控件写 QSS 会让它每次重绘都走 QStyleSheetStyle 那条更慢的路径，
+        // 而编辑器是整窗里重绘最频繁的控件。下面有一条专门检查"QSS 里不该再给它设色"。
         const QStringList requiredSelectors = {QStringLiteral("QMenuBar"),   QStringLiteral("QMenu"),
                                                QStringLiteral("QToolBar"),   QStringLiteral("QTabBar::tab"),
-                                               QStringLiteral("QPlainTextEdit"), QStringLiteral("QTreeView"),
-                                               QStringLiteral("QLineEdit"),  QStringLiteral("QPushButton"),
-                                               QStringLiteral("QStatusBar"), QStringLiteral("QDockWidget"),
-                                               QStringLiteral("QScrollBar"), QStringLiteral("QToolTip"),
-                                               QStringLiteral("QSplitter::handle")};
+                                               QStringLiteral("QTreeView"),  QStringLiteral("QLineEdit"),
+                                               QStringLiteral("QPushButton"), QStringLiteral("QStatusBar"),
+                                               QStringLiteral("QDockWidget"), QStringLiteral("QScrollBar"),
+                                               QStringLiteral("QToolTip"),   QStringLiteral("QSplitter::handle")};
         QStringList missing;
         for (const QString &selector : requiredSelectors) {
             if (!lightCss.contains(selector)) {
@@ -161,6 +165,11 @@ int main(int argc, char *argv[])
               QStringLiteral("覆盖: 两套 QSS 都覆盖了 %1 类关键控件").arg(requiredSelectors.size()),
               missing.join(QStringLiteral(", ")));
 
+        // 编辑器的颜色**不该**再出现在 QSS 里（防止有人好心"补回"那条规则，把性能优化改回去）
+        check(!lightCss.contains(QStringLiteral("QPlainTextEdit {"))
+                  && !darkCss.contains(QStringLiteral("QPlainTextEdit {")),
+              QStringLiteral("性能: QSS 里没有再给 QPlainTextEdit 设色（它走 QPalette）"));
+
         // 选择器清单一致：加了控件忘了在另一套里补，切换时就会出现"这里还是旧样式"
         QStringList lightSelectors = selectorsOf(lightCss);
         QStringList darkSelectors = selectorsOf(darkCss);
@@ -170,20 +179,28 @@ int main(int argc, char *argv[])
               QStringLiteral("结构: 两套 QSS 的选择器清单完全一致"),
               QStringLiteral("light %1 条 / dark %2 条").arg(lightSelectors.size()).arg(darkSelectors.size()));
 
-        // ★ 契约：QSS 里的编辑器底色必须等于 ThemePalette 的底色。
-        //   两处不一致的表现是"文字换了色、背景还是旧色"，非常容易被看成渲染 bug。
+        // ★ 契约（性能优化之后的新形态）：编辑器的底色/文字色/选中色**由 QPalette 提供**，
+        //   不再写在 QSS 里。这里检查两件事：
+        //     1) 颜色值必须来自 ThemePalette（否则主题切换时编辑器颜色会不跟上）；
+        //     2) QSS 里不该再有这些颜色（说明没人把那条慢路径加回来）。
+        //   真机上的行为在下面 G 节用真的 EditorWidget 验证（palette().color(Base) 等）。
         const ThemePalette lightPalette = ThemePalette::light();
         const ThemePalette darkPalette = ThemePalette::dark();
-        check(lightCss.contains(lightPalette.editorBackground.name()),
-              QStringLiteral("契约: 亮色 QSS 的编辑器底色 = ThemePalette::light()"),
-              lightPalette.editorBackground.name());
-        check(darkCss.contains(darkPalette.editorBackground.name()),
-              QStringLiteral("契约: 暗色 QSS 的编辑器底色 = ThemePalette::dark()"),
-              darkPalette.editorBackground.name());
-        check(lightCss.contains(lightPalette.editorForeground.name()),
-              QStringLiteral("契约: 亮色 QSS 的编辑器文字色 = ThemePalette::light()"));
-        check(darkCss.contains(darkPalette.editorForeground.name()),
-              QStringLiteral("契约: 暗色 QSS 的编辑器文字色 = ThemePalette::dark()"));
+        check(!lightPalette.selectionBackground.isValid() ? false : true,
+              QStringLiteral("契约: 亮色定义了选中色（给 QPalette 用）"));
+        check(lightPalette.selectionBackground != darkPalette.selectionBackground,
+              QStringLiteral("契约: 亮暗两套的选中色不同"),
+              QStringLiteral("%1 / %2").arg(lightPalette.selectionBackground.name(),
+                                            darkPalette.selectionBackground.name()));
+        // 反过来检查"编辑器这条规则整个不在了"。两个坑都踩过了，所以这里用正则匹配**选择器**：
+        //   * 不能查颜色值 —— #ffffff 这类颜色在别的控件（树、输入框…）里是合法出现的；
+        //   * 不能查字符串 —— 文件里的注释会提到 QPlainTextEdit（"编辑器不走 QSS"那段说明）。
+        static const QRegularExpression editorSelectorRe(QStringLiteral("(?m)^\\s*QPlainTextEdit\\s*[,{]"));
+        check(!editorSelectorRe.match(lightCss).hasMatch() && !editorSelectorRe.match(darkCss).hasMatch(),
+              QStringLiteral("性能: 两套 QSS 里都不再有 QPlainTextEdit 选择器（编辑器走 QPalette）"));
+        // 但编辑器**内部**的滚动条还是要靠 QSS 上色的（那部分没有性能问题：它只是滚动条）
+        check(lightCss.contains(QStringLiteral("QScrollBar")) && darkCss.contains(QStringLiteral("QScrollBar")),
+              QStringLiteral("性能: 滚动条样式还在（只把编辑器本体从 QSS 里拿掉）"));
     }
 
     // ============================ C. 配色质量（两套互不相同 + 对比度）============================
@@ -369,6 +386,25 @@ int main(int argc, char *argv[])
         check(darkHeading != lightHeading, QStringLiteral("编辑器: 两次的标题颜色不同"));
         check(editor.themePalette().editorBackground == ThemePalette::dark().editorBackground,
               QStringLiteral("编辑器: themePalette() 能读回当前配色"));
+
+        // ★ 性能优化之后的新契约：编辑器的底色/字色/选中色走 QPalette（不走 QSS）。
+        // 这里在真控件上验证"颜色真的跟着主题变了"，而不只是内部字段被改了。
+        const QPalette darkWidgetPalette = editor.palette();
+        check(darkWidgetPalette.color(QPalette::Base) == ThemePalette::dark().editorBackground,
+              QStringLiteral("编辑器: QPalette 底色 = 暗色的编辑器底色"),
+              darkWidgetPalette.color(QPalette::Base).name());
+        check(darkWidgetPalette.color(QPalette::Text) == ThemePalette::dark().editorForeground,
+              QStringLiteral("编辑器: QPalette 文字色 = 暗色的编辑器文字色"),
+              darkWidgetPalette.color(QPalette::Text).name());
+        check(darkWidgetPalette.color(QPalette::Highlight) == ThemePalette::dark().selectionBackground,
+              QStringLiteral("编辑器: QPalette 选中底色 = 暗色的选中色"),
+              darkWidgetPalette.color(QPalette::Highlight).name());
+
+        editor.setThemePalette(ThemePalette::light());
+        const QPalette lightWidgetPalette = editor.palette();
+        check(lightWidgetPalette.color(QPalette::Base) == ThemePalette::light().editorBackground,
+              QStringLiteral("编辑器: 切回亮色后 QPalette 底色也跟着回来了"),
+              lightWidgetPalette.color(QPalette::Base).name());
 
         // 同一套配色重复应用：不做无谓的重绘（闪烁就是这么来的）
         editor.setThemePalette(ThemePalette::dark());

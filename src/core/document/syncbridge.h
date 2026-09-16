@@ -46,6 +46,10 @@ signals:
     // C++ 内部：预览被点击，要求编辑器把光标跳到第 line 行
     void previewClicked(int line);
 
+    // 网页报回来的帧统计（性能排查）：frames 帧里最长的一帧间隔是 worstMs。
+    // 主窗口把它写进日志 —— 和编辑区那份统计一起看，就知道掉帧发生在哪一侧。
+    void previewFramesReported(int frames, int worstMs);
+
 public slots:
     // 给 MainWindow 调用：报告编辑器当前顶行。信号只能由本类自己发射，
     // 所以外面要通过这个槽来"触发"信号。
@@ -53,6 +57,9 @@ public slots:
 
     // 给 JS 调用（WebChannel 把它暴露成 syncBridge.reportPreviewClick(line)）
     void reportPreviewClick(int line);
+
+    // 给 JS 调用：网页侧的帧统计（模板里滚动停手后调一次）
+    void reportPreviewFrames(int frames, int worstMs);
 };
 
 }  // namespace markdown_editor::core::document

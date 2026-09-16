@@ -101,6 +101,13 @@ void SyncBridge::reportPreviewClick(int line)
     emit previewClicked(line);
 }
 
+void SyncBridge::reportPreviewFrames(int frames, int worstMs)
+{
+    // 网页侧滚动结束时报回来（模板里的 frameProbe）。这里只是转成信号，
+    // 真正的"写日志"在主窗口 —— 桥这一层不要顺带做界面的事。
+    emit previewFramesReported(frames, worstMs);
+}
+
 QList<int> SyncBridge::buildLineMap(const QString &markdown)
 {
     QList<int> lines;

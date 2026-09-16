@@ -768,6 +768,55 @@ int main(int argc, char *argv[])
         }
     }
 
+    // ============================ M. 滚动掉帧这一轮（帧统计 + 编辑器脱 QSS + 拖动分栏）============================
+    {
+        std::printf("---- M. 滚动掉帧 ----\n");
+
+        // ---- 帧统计：两侧都要能量 ----
+        check(cpp.contains(QStringLiteral("&EditorWidget::framesReported"))
+                  && cpp.contains(QStringLiteral("帧统计（编辑区）")),
+              QStringLiteral("帧统计: 编辑区那一侧会写日志"));
+        check(cpp.contains(QStringLiteral("&SyncBridge::previewFramesReported"))
+                  && cpp.contains(QStringLiteral("帧统计（预览网页）")),
+              QStringLiteral("帧统计: 预览网页那一侧也会写日志（两边一比就知道谁掉帧）"));
+        {
+            const QString ed = readFile(root + QStringLiteral("/src/business/editorwidget.cpp"));
+            check(ed.contains(QStringLiteral("m_frameProbe.recordFrame()")),
+                  QStringLiteral("帧统计: 编辑区在每次重绘时记账"));
+            check(ed.contains(QStringLiteral("void EditorWidget::reportFrameStats()")),
+                  QStringLiteral("帧统计: 停手之后汇总成一句话"));
+            const QString tmpl = readFile(root + QStringLiteral("/resources/html/preview_template.html"));
+            check(tmpl.contains(QStringLiteral("reportPreviewFrames")),
+                  QStringLiteral("帧统计: 网页侧把它自己的帧数/最长间隔报回来"));
+            check(tmpl.contains(QStringLiteral("window.addEventListener('scroll'")),
+                  QStringLiteral("帧统计: 网页侧只在滚动时采样（不常驻 rAF，避免污染测量）"));
+        }
+
+        // ---- 编辑器脱离 QSS（每帧少走一条慢绘制路径）----
+        check(!readFile(root + QStringLiteral("/resources/styles/light.qss")).contains(QStringLiteral("QPlainTextEdit"))
+                  || !readFile(root + QStringLiteral("/resources/styles/light.qss"))
+                          .contains(QStringLiteral("\nQPlainTextEdit {")),
+              QStringLiteral("QSS: 亮色样式表里没有编辑器本体规则了"));
+        {
+            const QString ed = readFile(root + QStringLiteral("/src/business/editorwidget.cpp"));
+            check(ed.contains(QStringLiteral("QPlainTextEdit::palette()")),
+                  QStringLiteral("QSS: 编辑器颜色改成通过 QPalette 设置"));
+            check(ed.contains(QStringLiteral("QPalette::Base")), QStringLiteral("QSS: 设置了底色"));
+            check(ed.contains(QStringLiteral("QPalette::Highlight")), QStringLiteral("QSS: 设置了选中色"));
+        }
+
+        // ---- 拖动分栏时冻结预览重绘 ----
+        {
+            const QString wb = readFile(root + QStringLiteral("/src/business/editorworkbench.cpp"));
+            check(wb.contains(QStringLiteral("setUpdatesEnabled(false)")),
+                  QStringLiteral("分栏: 拖动期间冻结预览重绘（避免连续 resize）"));
+            check(wb.contains(QStringLiteral("setUpdatesEnabled(true)")),
+                  QStringLiteral("分栏: 松手后恢复重绘"));
+            check(wb.contains(QStringLiteral("m_splitterDragSettle")),
+                  QStringLiteral("分栏: 用防抖判断「拖完了」（QSplitter 没有开始/结束信号）"));
+        }
+    }
+
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部通过" : "有失败项", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

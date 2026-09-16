@@ -15,6 +15,7 @@
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTextFormat>
+#include <QTimer>
 #include <QToolTip>  // 行号栏的悬停提示
 #include <QtGlobal>
 
@@ -97,6 +98,14 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     // ---- 2. 行号栏 ----
     m_lineNumberArea = new LineNumberArea(this);
 
+    // ---- 2b. 帧统计（性能排查）----
+    // 滚动时每帧都会走到 updateLineNumberArea，那里只记一个时间戳；
+    // 这里负责"停手之后报一次"。300ms 的静默判定和"输入停止才渲染"是同一个思路：
+    // 一轮交互结束了再总结，而不是边滚边刷日志。
+    m_frameReportTimer.setSingleShot(true);
+    m_frameReportTimer.setInterval(300);
+    connect(&m_frameReportTimer, &QTimer::timeout, this, &EditorWidget::reportFrameStats);
+
     // ---- 3. 主题配色 ----
     // 颜色来自 ThemePalette（亮色起步）：行号栏和高亮器都用同一份，
     // 切主题时 ThemeManager 会推进来新的一份（见 setThemePalette）。
@@ -163,6 +172,19 @@ void EditorWidget::setThemePalette(const ThemePalette &palette)
     m_currentLineNumberColor = palette.currentLineNumberText;
     m_currentLineColor = palette.currentLineHighlight;
     m_currentLineColor.setAlpha(40);  // 当前行高亮要"看得见但不抢眼"
+
+    // 编辑器自身的底色/字色/选中色：用 QPalette 而不是 QSS（性能）。
+    // 给控件写 QSS 会让它每次重绘都走 QStyleSheetStyle 那条更慢的路径，
+    // 而编辑器正是整窗里重绘最频繁的控件 —— 滚动时这个"税"每帧都要交一次。
+    // 用 QPalette 之后它走普通绘制路径，颜色照样跟着主题变。
+    // 注意：这里必须写 QPlainTextEdit::palette()。
+    // 参数名就叫 palette，直接写 palette() 会被解析成"调用那个参数"，编译不过。
+    QPalette widgetPalette = QPlainTextEdit::palette();
+    widgetPalette.setColor(QPalette::Base, palette.editorBackground);
+    widgetPalette.setColor(QPalette::Text, palette.editorForeground);
+    widgetPalette.setColor(QPalette::Highlight, palette.selectionBackground);
+    widgetPalette.setColor(QPalette::HighlightedText, palette.selectionForeground);
+    setPalette(widgetPalette);
 
     if (m_highlight != nullptr) {
         m_highlight->setPalette(palette);  // 语法高亮重建规则并重新上一遍色
@@ -542,6 +564,13 @@ void EditorWidget::updateLineNumberAreaWidth(int /*newBlockCount*/)
 
 void EditorWidget::updateLineNumberArea(const QRect &rect, int dy)
 {
+    // 帧统计（性能排查）：updateRequest 就是"视口要重绘一帧"，数它就是数帧。
+    // 注意这是**每一次重绘**都会走的地方，所以这里只能做极轻的事（记个时间戳）。
+    m_frameProbe.recordFrame();
+    if (!m_frameReportTimer.isActive()) {
+        m_frameReportTimer.start();
+    }
+
     if (dy != 0) {
         m_lineNumberArea->scroll(0, dy);  // 整体滚动：行号跟着挪，不用重画
     } else {
@@ -551,6 +580,33 @@ void EditorWidget::updateLineNumberArea(const QRect &rect, int dy)
     if (rect.contains(viewport()->rect())) {
         updateLineNumberAreaWidth(0);  // 行数位数可能刚刚变了
     }
+}
+
+// 滚动停手（300ms 没有新帧）之后，把这一轮的帧统计报一句话出去。
+// 主窗口只是把它写进日志 —— 这条日志是"到底哪一侧掉帧"的直接证据。
+void EditorWidget::reportFrameStats()
+{
+    if (!m_frameProbe.hasSamples()) {
+        return;
+    }
+
+    const markdown_editor::core::document::FrameProbe::Summary summary = m_frameProbe.summary();
+    m_frameProbe.reset();
+
+    if (summary.frames < 3) {
+        return;  // 太少的样本说明不了什么（点一下、改一下都会产生一两帧）
+    }
+
+    emit framesReported(QStringLiteral("编辑区重绘 %1 帧，平均 %2 ms（%3 fps），最长 %4 ms")
+                            .arg(summary.frames)
+                            .arg(summary.averageMs, 0, 'f', 1)
+                            .arg(summary.fps, 0, 'f', 0)
+                            .arg(summary.worstMs, 0, 'f', 1));
+}
+
+markdown_editor::core::document::FrameProbe::Summary EditorWidget::editorFrameSummary() const
+{
+    return m_frameProbe.summary();
 }
 
 void EditorWidget::resizeEvent(QResizeEvent *event)

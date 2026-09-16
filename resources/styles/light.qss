@@ -115,13 +115,11 @@ QTabBar::tab:hover:!selected {
 }
 
 /* ---------------- 编辑器 ---------------- */
-QPlainTextEdit {
-    background-color: #ffffff;   /* = ThemePalette::light().editorBackground */
-    color: #24292f;              /* = ThemePalette::light().editorForeground */
-    border: none;
-    selection-background-color: #b6d7ff;
-    selection-color: #24292f;
-}
+/* QPlainTextEdit 的底色/字色/选中色**不走 QSS**，而是由 ThemeManager::editorPalette()
+   提供的 QPalette 设置（EditorWidget::setThemePalette 里 setPalette）。
+   原因（性能）：给控件写 QSS 会让它每次重绘都走 QStyleSheetStyle 那条较慢的路径，
+   而编辑器是整窗重绘最频繁的控件 —— 滚动时这个税每帧都要交一次。
+   颜色值仍然和 ThemePalette 一一对应，test_thememanager 会核对。 */
 
 /* ---------------- 文件树 / 搜索面板的结果树 ---------------- */
 QTreeView,

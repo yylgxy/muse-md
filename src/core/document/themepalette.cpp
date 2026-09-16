@@ -26,6 +26,9 @@ ThemePalette ThemePalette::light()
 
     p.editorBackground = QColor(0xff, 0xff, 0xff);
     p.editorForeground = QColor(0x24, 0x29, 0x2f);
+    // 选中色沿用原来 QSS 里的值（视觉一模一样，只是改成通过 QPalette 传递）
+    p.selectionBackground = QColor(0xb6, 0xd7, 0xff);
+    p.selectionForeground = QColor(0x24, 0x29, 0x2f);
 
     p.gutterBackground = QColor(0xf6, 0xf8, 0xfa);
     p.gutterText = QColor(0x8c, 0x95, 0x9f);
@@ -53,6 +56,9 @@ ThemePalette ThemePalette::dark()
 
     p.editorBackground = QColor(0x0d, 0x11, 0x17);
     p.editorForeground = QColor(0xc9, 0xd1, 0xd9);
+    // 选中色沿用原来 QSS 里的值（视觉一模一样，只是改成通过 QPalette 传递）
+    p.selectionBackground = QColor(0x1f, 0x6f, 0xeb);
+    p.selectionForeground = QColor(0xff, 0xff, 0xff);
 
     p.gutterBackground = QColor(0x01, 0x04, 0x09);
     p.gutterText = QColor(0x7d, 0x85, 0x90);

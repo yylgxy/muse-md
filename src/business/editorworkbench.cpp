@@ -27,6 +27,27 @@ EditorWorkbench::EditorWorkbench(QWidget *parent) : QSplitter(parent)
     m_renderer = new PreviewRenderer(this);
     m_bridge = new SyncBridge(this);
 
+    // ---- 拖动分栏时别让预览一直跟着 resize（性能）----
+    // QWebEngineView 每次尺寸变化都要让 Chromium 重新分配并重绘它那块画布；
+    // 拖分隔条是连续几十上百次尺寸变化 —— 表现就是"拖起来一顿一顿"。
+    // 做法：拖动期间冻结预览的重绘（"移动中就移动中"，松手再画一次）。
+    // 用防抖而不是 mousePress/Release：QSplitter 没有"开始拖"的信号，
+    // 而"最后一次移动之后 200ms 没有新移动"就等于松手，判定简单且不会漏。
+    m_splitterDragSettle.setSingleShot(true);
+    m_splitterDragSettle.setInterval(200);
+    connect(&m_splitterDragSettle, &QTimer::timeout, this, [this] {
+        if (m_previewView != nullptr) {
+            m_previewView->setUpdatesEnabled(true);  // 松手：恢复重绘并立刻刷一次
+            m_previewView->update();
+        }
+    });
+    connect(this, &QSplitter::splitterMoved, this, [this](int, int) {
+        if (m_previewView != nullptr) {
+            m_previewView->setUpdatesEnabled(false);  // 拖动中：先不画
+        }
+        m_splitterDragSettle.start();
+    });
+
     // ---- 预览 → 编辑器：点预览里的某一块，光标跳到对应源码行 ----
     connect(m_bridge, &SyncBridge::previewClicked, this, [this](int line) {
         if (m_editor == nullptr) {

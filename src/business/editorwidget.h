@@ -4,7 +4,9 @@
 #include <QColor>
 #include <QPlainTextEdit>
 #include <QString>
+#include <QTimer>  // m_frameReportTimer 是值成员
 
+#include "frameprobe.h"    // 帧统计（性能排查）
 #include "themepalette.h"  // 值成员，需要完整定义（主题配色）
 
 class QKeyEvent;
@@ -12,6 +14,7 @@ class QPaintEvent;
 class QResizeEvent;
 class QContextMenuEvent;
 class QMenu;
+class QTimer;
 class MarkdownHighlighter;  // 全局命名空间的类（命名空间不统一的遗留）
 
 // 编辑器核心控件：在 QPlainTextEdit 之上补齐"写 Markdown 需要的东西"。
@@ -170,7 +173,17 @@ public:
     void setHighlightingEnabled(bool enabled);
     bool isHighlightingEnabled() const;
 
+    // ============================ 帧统计（性能排查）============================
+
+    // 编辑器重绘一帧的间隔统计：滚动时"卡不卡"最直接的证据。
+    // QPlainTextEdit 每次要重绘视口都会发 updateRequest，所以这里数到的就是"帧"。
+    // 滚动停手（300ms 没有新帧）之后会通过 framesReported 把一句话报出来。
+    markdown_editor::core::document::FrameProbe::Summary editorFrameSummary() const;
+
 signals:
+    // 滚动停手之后报一次"编辑区这一轮重绘得怎么样"（主窗口负责写进日志）
+    void framesReported(const QString &summary);
+
     // 光标位置变了。行、列**都从 1 起算**（人类数的第几行第几列）。
     void cursorMoved(int line, int column);
 
@@ -189,6 +202,8 @@ protected:
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
+    // 帧统计（性能排查）：滚动停手之后把这一轮的数字报出去
+    void reportFrameStats();
     void updateLineNumberArea(const QRect &rect, int dy);
     void refreshCurrentLine();
     // 文档长度变了：决定要不要进/出快速模式（用字符数是 O(1)，不碰真正的文本）
@@ -215,8 +230,7 @@ private:
     int m_indentWidth = 4;
 
     // 大文档快速模式：true = 已经关掉语法高亮（见 kFastModeThresholdChars）
-    bool m_fastMode = false;
-    // 高亮的"用户意图"：即使处于快速模式，这个值也记着用户的开关状态，
+    bool m_fastMode = false;    // 高亮的"用户意图"：即使处于快速模式，这个值也记着用户的开关状态，
     // 退出快速模式时能恢复成他原来要的样子。
     bool m_highlightingWanted = true;
 
@@ -228,6 +242,10 @@ private:
     QColor m_lineNumberColor;
     QColor m_currentLineNumberColor;
     QColor m_currentLineColor;
+
+    // 帧统计（性能排查）：滚动停手 300ms 之后把这一轮的数字报出去
+    markdown_editor::core::document::FrameProbe m_frameProbe;
+    QTimer m_frameReportTimer;
 };
 
 #endif // EDITORWIDGET_H

@@ -9,7 +9,8 @@
 #include "filetreeview.h"       // 5.4.1：左边的文件树侧边栏（.ui 里已经有一块 FileTreeView）
 #include "logger.h"
 #include "previewrenderer.h"    // updateContent() 要用完整类型（渲染管线归工作台持有，这里只是借来用）
-#include "recentfiles.h"        // 5.4.2：最近打开的文件列表
+#include "recentfiles.h"
+#include "syncbridge.h"      // 帧统计：预览网页报回来的数据走它        // 5.4.2：最近打开的文件列表
 #include "searchpanel.h"        // 5.5：全文搜索面板（.ui 里就是一个 SearchPanel）
 #include "tabmanager.h"
 #include "thememanager.h"      // 5.7：亮暗主题（单例）
@@ -52,6 +53,7 @@ using markdown_editor::core::storage::VersionControl;
 // 渲染管线的类型要写全名：它和 FileManager 不一样，以前只用到它的成员函数、不用提名字，
 // 现在要连它的信号（contentSkipped / rendererRestarted），所以需要这个 using。
 using markdown_editor::core::document::PreviewRenderer;
+using markdown_editor::core::document::SyncBridge;  // 帧统计：预览网页报回来的那份数据走它
 // 代码高亮（5.7）："插入代码块"的语言列表和显示名都来自它
 using markdown_editor::core::document::CodeHighlighter;
 // 主题配色（5.7）：ThemeManager 是全局命名空间的类，但它返回的配色表在 core::document 里
@@ -202,6 +204,12 @@ void MainWindow::initUi()
 
     // 中央分屏现在是"编辑器 + 预览"两块，初始各占一半
     ui->workbench->setSplitSizes({600, 600});
+
+    // 帧统计（性能排查）：预览网页在滚动停手后报回它自己的帧数/最长帧间隔。
+    // 这一条和"编辑区"那条配对：谁的数字差，问题就在谁那边。
+    connect(ui->workbench->bridge(), &SyncBridge::previewFramesReported, this, [](int frames, int worstMs) {
+        LOG_INFO("帧统计（预览网页）: %1 帧，最长帧间隔 %2 ms", frames, worstMs);
+    });
 
     // 双击（或回车）一个文件 → 开成新标签。
     // 侧边栏本身不认识标签页，它只发"用户点了这个文件"，开到哪里是主窗口的事。
@@ -681,6 +689,14 @@ void MainWindow::connectSession(EditorWidget *editor, FileManager *files)
     connect(editor, &QPlainTextEdit::redoAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
     connect(editor, &QPlainTextEdit::copyAvailable, this, [refreshEditActions](bool) { refreshEditActions(); });
     connect(editor, &QPlainTextEdit::selectionChanged, this, [refreshEditActions] { refreshEditActions(); });
+
+    // 帧统计（性能排查）：编辑区滚动停手之后报一句话，直接写进日志。
+    // 和预览那侧的那份一起看，就知道"浏览掉帧"发生在哪一侧 —— 这是没法靠猜的：
+    //   编辑区平均/最长间隔大 → Qt 侧重绘慢（QSS、行号栏、高亮…）
+    //   预览帧率低、最长间隔大 → Chromium 合成慢（软件渲染、显卡驱动）
+    connect(editor, &EditorWidget::framesReported, this, [](const QString &summary) {
+        LOG_INFO("帧统计（编辑区）: %1", summary);
+    });
 
     // 编辑器右键菜单里的两项：对话框/语言列表都在主窗口这边，编辑器只发"用户要这个"
     connect(editor, &EditorWidget::findRequested, this, &MainWindow::onFind);

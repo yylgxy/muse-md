@@ -370,6 +370,77 @@ function scrollToLine(line) {
 let pendingScrollLine = null;
 let scrollFrameScheduled = false;
 
+/* =========================================================================
+   帧统计（性能排查）
+   -------------------------------------------------------------------------
+   和 C++ 侧（EditorWidget 里的 FrameProbe）配成一对：那边量"编辑区重绘"，
+   这边量"网页自己的帧间隔"。两个数字一对比，就知道掉帧发生在哪一侧 ——
+   是 Qt 编辑器重绘慢，还是 Chromium 在软件合成。
+
+   只在滚动期间采样（停手 300ms 报一次然后停下），不用常驻 rAF 循环：
+   常驻 rAF 本身会让合成器一直忙碌，那会污染测量结果，也白耗电。
+   ========================================================================= */
+const frameProbe = {
+    frames: 0,
+    worst: 0,
+    last: 0,
+    running: false,
+    timer: null,
+
+    start: function () {
+        if (this.running) {
+            return;
+        }
+        this.frames = 0;
+        this.worst = 0;
+        this.last = 0;
+        this.running = true;
+        const self = this;
+        const tick = function (now) {
+            if (!self.running) {
+                return;
+            }
+            if (self.last > 0) {
+                const gap = now - self.last;
+                if (gap > self.worst) {
+                    self.worst = gap;
+                }
+            }
+            self.last = now;
+            self.frames++;
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        this.armStop();
+    },
+
+    armStop: function () {
+        const self = this;
+        if (this.timer !== null) {
+            clearTimeout(this.timer);
+        }
+        this.timer = setTimeout(function () { self.stop(); }, 300);
+    },
+
+    stop: function () {
+        if (!this.running) {
+            return;
+        }
+        this.running = false;
+
+        // 报给 C++（QWebChannel）。bridge 还没连上就算了 —— 这点统计不值得排队等。
+        if (bridge && bridge.reportPreviewFrames && this.frames >= 3) {
+            bridge.reportPreviewFrames(this.frames, Math.round(this.worst));
+        }
+        this.frames = 0;
+    }
+};
+
+window.addEventListener('scroll', function () {
+    frameProbe.start();
+    frameProbe.armStop();
+}, { passive: true });
+
 function requestScrollToLine(line) {
     pendingScrollLine = line;
     if (scrollFrameScheduled) {

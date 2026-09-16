@@ -12,6 +12,7 @@
 #include "markdownhighlighter.h"  // 要调用 highlighter()->rehighlight()，需要完整类型
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QAction>
 #include <QImage>
 #include <QKeyEvent>
@@ -80,6 +81,16 @@ QImage renderWidget(QWidget &widget, const QSize &size)
     QPainter painter(&image);
     widget.render(&painter);
     return image;
+}
+
+// 转 ms 毫秒事件循环（帧统计要真的等出时间差）
+void spin(int ms)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+    }
 }
 
 }  // namespace
@@ -782,6 +793,63 @@ int main(int argc, char *argv[])
               QString::number(editor.characterCount()));
         check(editor.characterCount() == editor.toPlainText().size(),
               QStringLiteral("字符数: 打字之后仍与 toPlainText().size() 一致"));
+    }
+
+    // ============================ P. 帧统计探针（性能排查的基础）============================
+    //
+    // "浏览时掉帧"必须能量出来是哪一侧的问题，否则只能猜。
+    // FrameProbe 就是那件量具：记每一帧的时间戳，给出一句话的数字。
+    {
+        using markdown_editor::core::document::FrameProbe;
+
+        // ---- 纯换算规则 ----
+        FrameProbe::Summary s = FrameProbe::buildSummary(0, 0.0, 0.0);
+        check(s.frames == 0 && s.averageMs == 0.0 && s.fps == 0.0,
+              QStringLiteral("帧统计: 没有样本时都是 0（不会除零）"));
+
+        s = FrameProbe::buildSummary(11, 160.0, 40.0);  // 11 帧 = 10 个间隔
+        check(qFuzzyCompare(s.averageMs, 16.0), QStringLiteral("帧统计: 平均间隔 = 总时长 / 间隔数"),
+              QStringLiteral("%1 ms").arg(s.averageMs, 0, 'f', 2));
+        check(qFuzzyCompare(s.fps, 62.5), QStringLiteral("帧统计: 帧率由平均间隔换算"),
+              QStringLiteral("%1 fps").arg(s.fps, 0, 'f', 1));
+        check(qFuzzyCompare(s.worstMs, 40.0), QStringLiteral("帧统计: 最长间隔原样带出来"));
+        // 只有一帧时没有间隔可言 → 平均与帧率必须是 0（不能拿"帧数"当分母除出个假数字）。
+        // 这一条是被测试自己抓出来的：原来写成 totalMs / frames，三帧两间隔时平均会偏小。
+        s = FrameProbe::buildSummary(1, 25.0, 25.0);
+        check(s.frames == 1 && s.averageMs == 0.0 && s.fps == 0.0,
+              QStringLiteral("帧统计: 只有一帧时平均/帧率都是 0（不算错）"));
+
+        // ---- 真跑一遍：间隔明显不同的两段 ----
+        FrameProbe probe;
+        check(!probe.hasSamples(), QStringLiteral("帧统计: 一开始没有样本"));
+        probe.recordFrame();  // 第一帧：计时起点
+        check(probe.frameCount() == 1 && probe.summary().averageMs == 0.0,
+              QStringLiteral("帧统计: 只有第一帧时先算不出间隔（不算错）"));
+
+        spin(30);
+        probe.recordFrame();
+        spin(30);
+        probe.recordFrame();
+        const FrameProbe::Summary real = probe.summary();
+        check(real.frames >= 3, QStringLiteral("帧统计: 记满了三帧"), QStringLiteral("%1 帧").arg(real.frames));
+        check(real.worstMs >= 20.0,
+              QStringLiteral("帧统计: 最长间隔能反映「卡了一下」（这里刻意等了 30ms）"),
+              QStringLiteral("最长 %1 ms").arg(real.worstMs, 0, 'f', 1));
+
+        probe.reset();
+        check(!probe.hasSamples() && probe.frameCount() == 0,
+              QStringLiteral("帧统计: reset 之后清空（每一轮滚动单独统计）"));
+
+        // ---- 编辑器真的会在重绘时记账 ----
+        EditorWidget counted;
+        counted.resize(400, 200);
+        check(counted.editorFrameSummary().frames == 0,
+              QStringLiteral("帧统计: 还没重绘过时是 0"));
+        counted.setPlainText(QStringLiteral("一\n二\n三"));
+        counted.repaint();  // 强制走一次真实重绘（updateRequest 就是在这里发的）
+        check(counted.editorFrameSummary().frames >= 1,
+              QStringLiteral("帧统计: 重绘之后编辑区记到了帧"),
+              QStringLiteral("%1 帧").arg(counted.editorFrameSummary().frames));
     }
 
     // ============================ L. 语法高亮器已绑定 ============================

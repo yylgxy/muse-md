@@ -130,6 +130,8 @@ private:
 
     // 滚动同步的合并（P0-2）：把一帧内的多次滚动合并成一次发送
     QTimer m_scrollCoalesce;               // 单次触发，约一帧（16ms）
+    // 拖动分隔条时的"预览冻结"：连续 resize 会让 Chromium 不停重画（见构造函数里的说明）
+    QTimer m_splitterDragSettle;
     int m_pendingScrollLine = -1;          // 待发的最顶可见行（-1 = 没有欠着的）
     int m_lastSentScrollLine = -1;         // 上一次真正发出去的行（相同就不用再发）
 

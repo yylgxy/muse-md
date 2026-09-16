@@ -9,6 +9,8 @@ add_library(core_document STATIC
     markdownhighlighter.cpp
     themepalette.h
     themepalette.cpp
+    frameprobe.h
+    frameprobe.cpp
     codehighlighter.h
     codehighlighter.cpp
     syncbridge.h
