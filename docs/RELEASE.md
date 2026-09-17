@@ -141,3 +141,57 @@ gh release create v1.0.0 dist\MuseMD-1.0.0-win64.zip `
 - [ ] 干净机器上按 8.5 的清单走过一遍（至少 1、2、3、5、6、7 这几条）
 - [ ] `README.md` 里的功能表与测试数量是当前的
 - [ ] 版本号在 `CMakeLists.txt`、关于对话框、GitHub 标签三处一致
+
+---
+
+## 同步到 Gitee（国内分享更方便）
+
+GitHub 在国内经常连不上，所以**同一份代码可以同时推到 Gitee**。这里的做法是把
+本地仓库当成唯一源头，GitHub 和 Gitee 都是它的镜像 —— 不经过 GitHub 中转。
+
+### 一次性配置
+
+```powershell
+git remote add gitee https://gitee.com/<你的用户名>/<仓库名>.git
+git remote -v          # 确认有 origin(GitHub) 和 gitee 两个远端
+```
+
+### 每次发新版之后同步
+
+```powershell
+git push gitee main            # 推分支
+git push gitee --tags          # 推标签（发行版要用）
+```
+
+### 认证怎么过
+
+Gitee 用 HTTPS 推送要凭据，**推荐用私人令牌**（比账号密码安全，也能随时吊销）：
+
+1. Gitee → 右上头像 → 设置 → 安全设置 → **私人令牌** → 生成新令牌
+2. 权限至少勾 `projects`
+3. 推送时用户名填 Gitee 用户名，**密码位置填这个令牌**
+4. 令牌只显示一次，复制下来存好
+
+Windows 上首次推送会弹出凭据窗口（Git Credential Manager），填一次之后会被记住 ✓。
+也可以让它记住：
+
+```powershell
+git config --global credential.helper manager
+```
+
+### 离线传递源码（没有网络时也能给别人）
+
+仓库可以打成一个**离线包**（含完整历史与标签，几百 KB）：
+
+```powershell
+git bundle create dist\MuseMD-repo.bundle --all     # 打包
+git bundle verify dist\MuseMD-repo.bundle           # 验证
+git clone dist\MuseMD-repo.bundle MuseMD-src        # 别人从它克隆
+```
+
+### Gitee 上放发布包
+
+Gitee 的「发行版」可以挂附件，但**92 MB 的 zip 建议按需上传**：
+在 Gitee 仓库页面 → 发行版 → 新建发行版 → 上传附件。日常分享用网盘/微信传 zip 更快。
+注意**不要把 zip 提交进仓库**（Gitee 对单文件和仓库容量都有限制，而且二进制塞进 git 会越滚越大）。
+
