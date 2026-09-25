@@ -92,8 +92,53 @@ void TabManager::updateTab(int index, const TabInfo &info)
         TabMeta meta;
         meta.filePath = info.filePath;
         meta.fileName = info.fileName;
+        meta.modified = info.modified;
         m_meta.insert(editor, meta);
     }
+}
+
+void TabManager::recordClosedTab(int index)
+{
+    const EditorWidget *editor = editorAt(index);
+    if (editor == nullptr) {
+        return;
+    }
+
+    const TabMeta meta = m_meta.value(editor);
+    // 没落过盘的标签不进栈 —— 它的内容我们没留任何副本，"能重开"是假的。
+    // （主窗口在"打开失败"时也会关掉刚建的空标签，那条同样走这里，正好被这一句挡掉。）
+    if (meta.filePath.isEmpty()) {
+        return;
+    }
+
+    ClosedTab record;
+    record.filePath = meta.filePath;
+    record.displayName = meta.fileName.isEmpty() ? QFileInfo(meta.filePath).fileName() : meta.fileName;
+    record.hadUnsavedChanges = meta.modified;
+    record.closedAt = QDateTime::currentDateTime();
+
+    const bool wasEmpty = m_closedTabs.isEmpty();
+    m_closedTabs.prepend(record);
+    while (m_closedTabs.size() > kMaxClosedTabs) {
+        m_closedTabs.removeLast();
+    }
+    // 只在 0 → 1 的那一次通知：动作从灰变亮只需要知道这一件事，
+    // 之后的每次关闭都发一遍等于让界面做无用功。
+    if (wasEmpty) {
+        emit closedTabAvailabilityChanged(true);
+    }
+}
+
+TabManager::ClosedTab TabManager::takeLastClosedTab()
+{
+    if (m_closedTabs.isEmpty()) {
+        return ClosedTab{};
+    }
+    const ClosedTab record = m_closedTabs.takeFirst();
+    if (m_closedTabs.isEmpty()) {
+        emit closedTabAvailabilityChanged(false);
+    }
+    return record;
 }
 
 void TabManager::closeTab(int index)
@@ -104,6 +149,8 @@ void TabManager::closeTab(int index)
 
     QWidget *page = widget(index);
     if (const EditorWidget *editor = qobject_cast<const EditorWidget *>(page)) {
+        // 先记录、再拆。顺序反了就拿不到 meta 了（记录要读的正是即将被删掉的那份）。
+        recordClosedTab(index);
         m_meta.remove(editor);  // 标签没了，它那份"路径记录"也要跟着走
     }
     removeTab(index);   // 只从标签栏摘掉，不释放页面

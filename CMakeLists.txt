@@ -95,3 +95,7 @@ add_subdirectory(src/app)
 # 测试：在构建目录里用 ctest -C Debug --output-on-failure 运行
 enable_testing()
 add_subdirectory(tests)
+
+# 性能基准（A2）：不是测试，是"指标回归"用的可执行程序。
+# 放在 tests 之后：它依赖 business / core_document，那些目标已经在前面定义好。
+add_subdirectory(bench)

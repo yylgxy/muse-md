@@ -8,6 +8,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
+
 // 全文搜索（5.5）：基于 SQLite FTS5 的文件内容索引。
 //
 // 索引的粒度是**行**：一个文件的每一行是一条记录。为什么按行而不是按文件：
@@ -34,8 +36,11 @@
 // 能指向任意库文件"（测试要对着临时库跑，同一进程里还要能开好几个）。
 // 两者混在一起还会让"索引库坏了"牵连到元数据。所以这里自己开具名连接。
 //
-// 线程注记：QSqlDatabase 与线程绑定，本类的连接**只在创建它的线程里用**。
-// 以后要把扫描放到后台线程，请在那个线程里另建一个 FullTextSearch 实例。
+// 线程注记（已落地，A1）：本类的连接**只在创建它的线程里用**。
+// 扫描现在跑在 SearchIndexWorker 所属的工作线程里，那个线程自己持有一个 FullTextSearch 实例
+//（写侧）；GUI 线程保留一个只读实例（读侧），负责 search() / indexedFileCount()。
+// 两边同时打开同一个库文件，靠 WAL 做到读写不互相阻塞 —— 见 ensureSchema() 里的 PRAGMA。
+// 谁要新建实例，就在**使用它的那个线程**里 new（QSqlDatabase::addDatabase 的硬要求）。
 
 // 一条搜索结果 = "某个文件的某一行里有匹配"
 struct SearchHit
@@ -56,6 +61,9 @@ struct IndexStats
     int filesRemoved = 0;  // 索引里有、磁盘上已经没有了（或不在这次扫描范围内）的文件数
     int linesIndexed = 0;  // 这次写进索引的行数
     qint64 elapsedMs = 0;  // 总耗时（毫秒）
+    // 这次索引是"被 requestCancel() 中断"的：事务已回滚，索引保持上一次的完整状态。
+    // 调用方要据此区分"索引完成"和"索引被取消"（后者不该报"完成"）。
+    bool cancelled = false;
 };
 
 class FullTextSearch : public QObject
@@ -86,6 +94,15 @@ public:
     // 语义是"目录的快照"：索引里那些**不在本次扫描结果里**的文件会被清掉
     //   （包括被删掉的、被改名的、以及不属于这个目录的）。
     IndexStats indexDirectory(const QString &dir, QString *error = nullptr);
+
+    // 请求中断正在跑的 indexDirectory()。
+    // 线程安全：可以从别的线程调（比如 GUI 线程点"取消"，或关窗口时）。
+    // 只对"当前这次"有效；下一次 indexDirectory() 开始时会自动复位。
+    //
+    // ★ 取消点只放在"文件之间"，不放在"文件内部"：每个文件是一个原子工作单元
+    //   （先删旧行、再插新行、最后写元数据），在中间停下会留下半个文件的索引；
+    //   文件之间停下则是干净的回滚点（事务整体回滚，索引保持上一次的完整状态）。
+    void requestCancel();
 
     // 搜索。结果按「文件 → 行号」排序（同一文件里的匹配聚在一起，界面直接分组显示）。
     // limit 是结果条数上限（0 或负数 = 空结果）；超限时只返回前 limit 条。
@@ -147,9 +164,18 @@ private:
     bool m_open = false;
     // FTS5 的 MATCH 能不能用来搜（= 表是按 trigram 建的）。false 时一律走 LIKE。
     bool m_matchUsable = false;
+
+    // 取消标志。用原子的原因：写它的是 GUI 线程，读它的是工作线程。
+    std::atomic_bool m_cancelRequested{false};
 };
 
 // 让 IndexStats 能安全地穿过信号槽（直接连接其实不需要，但排队连接/未来放别的线程就需要）
 Q_DECLARE_METATYPE(IndexStats)
+
+// C1：SearchHit 现在要随 SearchPanel::resultActivated 一起发出去。
+// 同进程内这个信号是直接连接、本来也能跑，但声明成元类型之后：
+//   * 换队列连接（将来把搜索也挪出 GUI 线程）不用再改这里；
+//   * 测试和调试代码可以用 QVariant::fromValue(hit) 带着它走。
+Q_DECLARE_METATYPE(SearchHit)
 
 #endif // FULLTEXTSEARCH_H

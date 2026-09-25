@@ -15,6 +15,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDateTime>
 #include <QMenu>
 #include <QPointer>
 #include <QString>
@@ -327,6 +328,129 @@ int main(int argc, char *argv[])
         check(tabs.requestCloseOtherTabs(0), QStringLiteral("关其它: 同意 -> 成功"));
         check(tabs.count() == 1 && tabs.tabTitles().first().startsWith(QStringLiteral("a.md")),
               QStringLiteral("关其它: 只留下被右键的那一个"), tabs.tabTitles().join(QLatin1Char(',')));
+    }
+
+    // ============================ H. 最近关闭的栈（C3）============================
+    //
+    // Ctrl+Shift+T 能不能"真的把那一个开回来"，取决于栈记的对不对。
+    // 这里面最容易做错、又最不该做错的是一条**否定规则**：
+    //   ★ 没有路径的标签（从没保存过的新文档）绝不能进栈。
+    // 因为它进去之后，用户按 Ctrl+Shift+T 会以为自己那半页字能回来，
+    // 结果只弹出一个空标签 —— 我们其实没留任何副本。这条规则要用测试钉住。
+    {
+        TabManager tabs;
+        int availabilitySignals = 0;
+        bool lastAvailability = false;
+        QObject::connect(&tabs, &TabManager::closedTabAvailabilityChanged, [&](bool canReopen) {
+            ++availabilitySignals;
+            lastAvailability = canReopen;
+        });
+
+        check(!tabs.canReopenClosedTab(), QStringLiteral("栈: 一开始没有可重开的标签"));
+        check(availabilitySignals == 0, QStringLiteral("栈: 没人关过东西 -> 不发状态信号"));
+        const TabManager::ClosedTab emptyRecord = tabs.takeLastClosedTab();
+        check(emptyRecord.filePath.isEmpty(), QStringLiteral("栈: 空栈弹出的是「没有路径」的记录（不崩）"));
+
+        // ---- 关一个有路径的标签 ----
+        tabs.addEditorTab();
+        tabs.updateTab(0, infoFor(QStringLiteral("a.md"), false, QStringLiteral("D:/notes/a.md")));
+        tabs.closeTab(0);
+
+        check(tabs.canReopenClosedTab(), QStringLiteral("栈: 关掉有路径的标签 -> 可以重开"));
+        check(availabilitySignals == 1 && lastAvailability,
+              QStringLiteral("栈: 0→1 时发了一次 available=true"),
+              QStringLiteral("signals=%1").arg(availabilitySignals));
+        QList<TabManager::ClosedTab> stack = tabs.closedTabs();
+        check(stack.size() == 1, QStringLiteral("栈: 多了 1 条"), QStringLiteral("size=%1").arg(stack.size()));
+        check(stack.first().filePath == QStringLiteral("D:/notes/a.md"),
+              QStringLiteral("栈: 记的是完整路径"), stack.first().filePath);
+        check(stack.first().displayName == QStringLiteral("a.md"),
+              QStringLiteral("栈: 显示名是关闭时标签上的名字"), stack.first().displayName);
+        check(!stack.first().hadUnsavedChanges, QStringLiteral("栈: 关闭时没有未保存改动"));
+        check(stack.first().closedAt.isValid(), QStringLiteral("栈: 记了关闭时间（提示语里要说清是哪一个）"));
+
+        // ---- 关一个没路径的标签：★ 不能进栈 ----
+        tabs.addEditorTab();  // 未命名，从没保存过
+        tabs.updateTab(0, infoFor(QStringLiteral("未命名"), true, QString()));  // 有路径字段是空的
+        tabs.closeTab(0);
+        check(tabs.closedTabs().size() == 1,
+              QStringLiteral("栈: ★没保存过的新文档不进栈（不给「能重开」的假承诺）"),
+              QStringLiteral("size=%1").arg(tabs.closedTabs().size()));
+        check(availabilitySignals == 1, QStringLiteral("栈: 那条被挡掉 -> 不发多余的状态信号"));
+
+        // ---- 带着未保存改动关掉的：要能提醒"改动不会回来" ----
+        tabs.addEditorTab();
+        tabs.updateTab(0, infoFor(QStringLiteral("b.md"), true, QStringLiteral("D:/notes/b.md")));
+        tabs.closeTab(0);
+        check(tabs.closedTabs().size() == 2 && tabs.closedTabs().first().hadUnsavedChanges,
+              QStringLiteral("栈: 记下「关的时候还带着未保存的改动」"));
+
+        // ---- 逆序恢复：后关的在前 ----
+        tabs.addEditorTab();  // 上一步把标签关空了，所以新标签又是 index 0
+        tabs.updateTab(0, infoFor(QStringLiteral("c.md"), false, QStringLiteral("D:/notes/c.md")));
+        tabs.closeTab(0);
+
+        const QStringList expectedOrder{QStringLiteral("D:/notes/c.md"),
+                                        QStringLiteral("D:/notes/b.md"),
+                                        QStringLiteral("D:/notes/a.md")};
+        QStringList popped;
+        while (tabs.canReopenClosedTab()) {
+            popped << tabs.takeLastClosedTab().filePath;
+        }
+        check(popped == expectedOrder,
+              QStringLiteral("栈: ★连按 N 次是「逆序恢复」（最近关的先回来）"),
+              popped.join(QStringLiteral(" -> ")));
+        check(availabilitySignals == 2 && !lastAvailability,
+              QStringLiteral("栈: 弹空之后发了 available=false（动作该变灰了）"),
+              QStringLiteral("signals=%1").arg(availabilitySignals));
+    }
+
+    // ---- 上限与"每条关闭路径都会进栈" ----
+    {
+        TabManager tabs;
+        // createTabContextMenu / requestCloseTabsToRight / requestCloseAllTabs 各自都是**独立的入口**，
+        // 记录只写在 closeTab() 一处，所以这些入口必须全部覆盖到 —— 这个循环就是在钉这一点。
+        for (int i = 0; i < TabManager::kMaxClosedTabs + 3; ++i) {
+            tabs.addEditorTab();
+            tabs.updateTab(i, infoFor(QStringLiteral("f%1.md").arg(i), false,
+                                      QStringLiteral("D:/notes/f%1.md").arg(i)));
+        }
+        for (int i = tabs.count() - 1; i >= 0; --i) {
+            tabs.requestCloseTab(i);  // 从后往前关（和 requestCloseAllTabs 的走法一致）
+        }
+
+        const QList<TabManager::ClosedTab> stack = tabs.closedTabs();
+        check(stack.size() == TabManager::kMaxClosedTabs,
+              QStringLiteral("栈: 关到超过上限时只留最近 %1 条").arg(TabManager::kMaxClosedTabs),
+              QStringLiteral("size=%1").arg(stack.size()));
+        check(stack.first().filePath == QStringLiteral("D:/notes/f0.md"),
+              QStringLiteral("栈: 最后关掉的那条在最前面"), stack.first().filePath);
+        check(!stack.last().filePath.contains(QStringLiteral("f11.md")),
+              QStringLiteral("栈: 最老的被挤出去了"), stack.last().filePath);
+        check(tabs.count() == 0 && tabs.canReopenClosedTab(),
+              QStringLiteral("栈: 标签都关掉了，栈里还有东西（可以一路重开回来）"));
+    }
+
+    // ---- 通过 requestCloseTabsToRight / requestCloseAllTabs 关掉的也要进栈 ----
+    {
+        TabManager tabs;
+        tabs.setCloseConfirmHandler([](EditorWidget *) { return true; });
+        tabs.addEditorTab();
+        tabs.updateTab(0, infoFor(QStringLiteral("a.md"), false, QStringLiteral("D:/notes/a.md")));
+        tabs.addEditorTab();
+        tabs.updateTab(1, infoFor(QStringLiteral("b.md"), false, QStringLiteral("D:/notes/b.md")));
+        tabs.addEditorTab();
+        tabs.updateTab(2, infoFor(QStringLiteral("c.md"), false, QStringLiteral("D:/notes/c.md")));
+
+        check(tabs.requestCloseTabsToRight(0), QStringLiteral("栈: 关右侧 -> 成功"));
+        check(tabs.requestCloseAllTabs(), QStringLiteral("栈: 关全部 -> 成功"));
+        check(tabs.closedTabs().size() == 3,
+              QStringLiteral("栈: ★其它关闭入口（关右侧/关全部）也进了栈，一条都没漏"),
+              QStringLiteral("size=%1").arg(tabs.closedTabs().size()));
+        // 栈是"最近的在前"，所以最后关掉的 a.md 在栈顶（不是栈底）。
+        // 这条别写反 —— 写反了测试也是绿的，但"重开"就会翻出最老的那个。
+        check(tabs.closedTabs().first().filePath == QStringLiteral("D:/notes/a.md"),
+              QStringLiteral("栈: 最后关的 a.md 在栈顶"), tabs.closedTabs().first().filePath);
     }
 
     if (g_fail == 0) {

@@ -6,6 +6,8 @@
 #include <QObject>
 #include <QString>
 
+#include "linediff.h"
+
 namespace markdown_editor::core::storage {
 
 // 版本控制服务：用系统 Git 给文档做"轻量快照"（本地历史）。
@@ -117,6 +119,24 @@ public:
     // 某个提交相对它**父提交**的差异（历史列表里点一条最常用这个）。
     // 第一个提交没有父提交：此时与 git 的"空树"比较，得到"全部是新增"的 diff。
     QString diffWithParent(const QString &repoDir, const QString &rev, QString *error = nullptr) const;
+
+    // 用**自研行级 diff** 算"某个提交相对父提交"的差异，结果是**结构化的**（B1）。
+    //
+    // 与 diffWithParent() 的分工：
+    //   * 取内容仍然走 git（contentOf）—— 那一部分 git 是不可替代的；
+    //   * **只有"算差异"这一步是本地算法**，所以不依赖 git 的输出格式，
+    //     也不受 git 版本 / 语言环境的影响。
+    //   * 返回结构而不是文本：有了结构，历史面板才能"按行显示 + 点一行跳到编辑器那一行"
+    //     （现在只做到"显示文本"，结构已经在手，接界面是下一步）。想要文本时用
+    //     LineDiff::toUnifiedText() 转一次即可。
+    //
+    // 第一个提交没有父提交 → 旧文本当空（与 diffWithParent 的语义一致，都是"全是新增"）。
+    // 失败：返回空 Result 且 error 非空。**返回 hunks 为空、identical() 为真也可能是成功**
+    //      （那一版相对父提交没变），所以判断成败要看 error（同 contentOf 的约定）。
+    // 返回类型写全名：本文件在 core::storage 里，LineDiff 在 core::document 里，
+    // 无限定名是找不到的（这也正是分层想让编译器挡住的那种"顺手用"）。
+    markdown_editor::core::document::LineDiff::Result
+    diffWithParentLocal(const QString &repoDir, const QString &rev, QString *error = nullptr) const;
 
     // 取某个版本里保存的**完整内容**（就是那一版的 snapshot.md 内容），回滚功能用它。
     // 成功：返回内容。**返回空字符串也可能是成功** —— 那一版就是个空文档，

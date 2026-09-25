@@ -3,12 +3,15 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>   // C2：记"上一个编辑器"要用它（标签可能已经被销毁）
 #include <QString>
+#include <QTimer>     // C4：大纲刷新的 300ms 防抖（窗口的成员定时器）
 
 #include "editorworkbench.h"    // 显示模式的枚举类型出现在槽签名里，需要完整定义
 #include "exporter.h"           // 5.6：导出器是整个窗口的一个成员（按值持有）
 #include "filemanager.h"        // 会话表里用它的指针，但接口里出现它的类型，所以需要完整定义
 #include "findreplacedialog.h"  // 查找/替换对话框是窗口的一个成员（按值持有）
+#include "fulltextsearch.h"     // C1：onSearchResultActivated(SearchHit) 的签名里用到它
 #include "editorsyncscheduler.h"  // 性能（P0-1）：编辑器 → 文档的延迟同步节流器
 #include "recentfiles.h"        // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
 #include "sessionstate.h"       // 6.2：窗口/会话记忆（静态工具类）
@@ -110,6 +113,12 @@ private slots:
     void onSaveFile();
     void onSaveFileAs();
     void onCloseTab();
+    void onReopenClosedTab();   // C3：重开最近关掉的那个标签（Ctrl+Shift+T）
+    void onOutlineLineActivated(int line);   // C4：大纲里点了一项 -> 跳到那一行
+    void onFocusModeToggled(bool on);        // C5：焦点模式开关
+    void onShowTextStats();                  // C5：写作统计（点击时才计算）
+    void onImportTheme();                    // C7：导入主题 JSON
+    void onExportTheme();                    // C7：导出当前配色为 JSON
     void onNextTab();
     void onPreviousTab();
 
@@ -138,8 +147,9 @@ private slots:
     // 帮助 → 关于
     void onAbout();
 
-    // 点了一条全文搜索结果（5.5）：打开那个文件并跳到那一行
-    void onSearchResultActivated(const QString &filePath, int line);
+    // 点了一条全文搜索结果（5.5）：打开那个文件、跳到那一行，并把命中词选中（C1）。
+    // 参数是整条 SearchHit（而不是路径 + 行号）：命中词的位置也在里面。
+    void onSearchResultActivated(const SearchHit &hit);
 
     // 标签切换（TabManager 的信号；nullptr = 已经没有标签了）
     void onCurrentTabChanged(EditorWidget *editor);
@@ -263,11 +273,47 @@ private:
 
     // ============================ 窗口记忆（6.2）============================
     // 启动时恢复：窗口几何 + 上次打开的文件（磁盘上没了的跳过）+ 面板可见性
+    // + 每个标签的光标/滚动位置（C2）
     void restoreSession();
-    // 退出前保存（几何 + 当前打开的文件 + 当前索引 + 面板可见性）
+    // 退出前保存（几何 + 当前打开的文件 + 当前索引 + 面板可见性 + 光标位置）
     void saveSession() const;
     // 把当前所有标签里"有磁盘路径"的那些收集起来（顺序 = 标签顺序）
     QStringList openFilePaths() const;
+
+    // ---- C2：每个标签的光标与滚动位置 ----
+    // 把 editor 当前位置记进 m_viewState（离开一个标签时调它）。
+    void rememberViewState(EditorWidget *editor);
+    // 按 m_viewState 里记的，把 editor 的光标和滚动位置摆回去（切进来时调它）。
+    // 只读成员，所以是 const。
+    void applyViewState(EditorWidget *editor, const QString &path) const;
+
+    // ---- C4：大纲面板 ----
+    // 按 editor 的正文重扫一遍大纲。
+    // ⚠️ 传进来的 editor 由调用方保证是"当前编辑器"；定时器那条路径必须现读
+    // currentEditor()，绝不能捕获某个具体 editor（否则切标签后会把大纲刷成上一个文档的）。
+    void refreshOutline(EditorWidget *editor);
+
+    // key = 文件绝对路径，value 的格式见 SessionState::makeViewState()。
+    // 为什么在窗口里留一份内存副本而不是每次都读配置文件：
+    // 切标签是高频动作，只该碰内存；落盘留给 saveSession() 一次做完。
+    QHash<QString, QString> m_viewState;
+
+    // 大纲刷新的防抖定时器（C4）。
+    // 这是本项目第三种 300ms 级别的节流（另外两处是预览防抖、EditorSyncScheduler 的 150ms），
+    // 但它们守的是**不同的数据流**：预览守"重排 HTML"，同步守"编辑器 → 文档模型"，
+    // 这里守"散文扫描成标题树"。合并成一个定时器会让"打字时预览卡住大纲也不刷新"这类
+    // 互相牵连的故障出现 —— 宁可多一个成员，也不要三条数据流共用一个节拍。
+    QTimer m_outlineTimer;
+
+    // 焦点模式是"每个编辑器各自的属性"（存在 EditorWidget 里），但用户要的是
+    // "整个程序都这样"，所以主窗口也留一份：切标签时把它补到新标签上。
+    // 不这么做的话会出现"在 A 标签勾了焦点模式，切到 B 标签发现没生效"的不一致。
+    bool m_focusMode = false;
+
+    // 上一次显示过的编辑器。"离开时先记住它看到哪"需要知道离开的是谁，
+    // 而 QTabWidget 的 currentChanged 只告诉我们**新**的是谁，所以自己记着上一个。
+    // 用 QPointer：标签可能被关掉并销毁，裸指针会变悬垂。
+    QPointer<EditorWidget> m_lastEditor;
 
     Ui::MainWindow *ui = nullptr;
 
@@ -288,6 +334,7 @@ private:
     QAction *m_exportHtmlAction = nullptr;  // 5.6：导出为 HTML
     QAction *m_exportPdfAction = nullptr;   // 5.6：导出为 PDF
     QAction *m_closeTabAction = nullptr;
+    QAction *m_reopenTabAction = nullptr;   // 「重新打开关闭的标签」（Ctrl+Shift+T）
     QAction *m_nextTabAction = nullptr;
     QAction *m_previousTabAction = nullptr;
     // ---- 编辑菜单（作用于当前标签）----
@@ -313,8 +360,12 @@ private:
     QActionGroup *m_viewModeGroup = nullptr;     // 三个显示模式互斥
     QAction *m_showFileTreeAction = nullptr;     // 视图：显示/隐藏文件树侧边栏
     QAction *m_searchAction = nullptr;           // 视图：全文搜索面板（Ctrl+Shift+F）
+    QAction *m_outlineAction = nullptr;          // 视图：大纲面板（C4）
+    QAction *m_focusModeAction = nullptr;        // 视图：焦点模式（C5，可勾选）
     QAction *m_themeLightAction = nullptr;       // 视图 → 主题：亮色
     QAction *m_themeDarkAction = nullptr;        // 视图 → 主题：暗色
+    QAction *m_importThemeAction = nullptr;      // 视图 → 主题：导入主题…（C7）
+    QAction *m_exportThemeAction = nullptr;      // 视图 → 主题：导出当前主题…（C7）
     QActionGroup *m_themeGroup = nullptr;        // 两个主题互斥
 
     QMenu *m_recentMenu = nullptr;  // 文件 →「最近打开」子菜单（内容随列表重建）

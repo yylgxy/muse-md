@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Qt 6.5.3 带 WebEngine（预览区要它）。arch 用 win64_msvc2019_64 与本地一致。
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.3'
+          arch: win64_msvc2019_64
+          modules: 'qtwebengine'
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      # 测试需要 Qt Widgets 的事件循环，但没有真实显示器：
+      # offscreen 平台插件让控件在内存里"画"而不需要屏幕。
+      # test_endtoend / test_mainwindowlayout 本就不实例化 QWebEngineView
+      # （见 tests/CMakeLists.txt 的注释），所以这里**不需要** Chromium 沙箱也能跑。
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build -C Release --output-on-failure

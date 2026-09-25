@@ -7,6 +7,8 @@ add_library(core_storage STATIC
     versioncontrol.cpp
     cachemanager.h
     cachemanager.cpp
+    draftrecovery.h
+    draftrecovery.cpp
     textencoding.h
 )
 

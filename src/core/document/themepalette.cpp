@@ -1,5 +1,7 @@
 #include "themepalette.h"
 
+#include <QJsonObject>
+
 #include <QtGlobal>
 
 #include <cmath>
@@ -102,6 +104,97 @@ double ThemePalette::contrastRatio(const QColor &a, const QColor &b)
     const double lighter = qMax(la, lb);
     const double darker = qMin(la, lb);
     return (lighter + 0.05) / (darker + 0.05);
+}
+
+// ============================================================================
+// JSON 序列化（C7）
+// ============================================================================
+//
+// 19 个字段，序列化/反序列化都靠同一张"字段表"驱动，而不是手写 19 对 get/set ——
+// 手写的话，哪天加一个新配色字段，极可能只改了 toJson 忘了改 fromJson（或者反过来），
+// 于是"导出再导入"会悄悄丢一个字段。表驱动让"字段清单"只有一份，从根上杜绝这个错位。
+//
+// 每个字段项记录：JSON 键名、在 ThemePalette 里的偏移（用成员指针取地址）、
+// 以及一个给校验提示用的中文名。成员指针是 QColor ThemePalette::*，
+// 序列化用 this->*field，反序列化用 out->*field。
+
+namespace {
+
+struct FieldSpec
+{
+    const char *key;                 // JSON 键名
+    QColor ThemePalette::*member;    // 成员指针
+    const char *displayName;         // 报错时给人看的中文名
+};
+
+// ★ 顺序就是 JSON 里字段出现的顺序（也是导入时要求的字段集合）。加新字段**只改这里**。
+const FieldSpec kFields[] = {
+    {"editorBackground", &ThemePalette::editorBackground, "编辑器底色"},
+    {"editorForeground", &ThemePalette::editorForeground, "编辑器文字"},
+    {"selectionBackground", &ThemePalette::selectionBackground, "选中底色"},
+    {"selectionForeground", &ThemePalette::selectionForeground, "选中文字"},
+    {"gutterBackground", &ThemePalette::gutterBackground, "行号栏底色"},
+    {"gutterText", &ThemePalette::gutterText, "行号"},
+    {"currentLineNumberText", &ThemePalette::currentLineNumberText, "当前行号"},
+    {"currentLineHighlight", &ThemePalette::currentLineHighlight, "当前行高亮"},
+    {"heading", &ThemePalette::heading, "标题"},
+    {"bold", &ThemePalette::bold, "粗体"},
+    {"italic", &ThemePalette::italic, "斜体"},
+    {"inlineCodeForeground", &ThemePalette::inlineCodeForeground, "行内代码文字"},
+    {"inlineCodeBackground", &ThemePalette::inlineCodeBackground, "行内代码底色"},
+    {"link", &ThemePalette::link, "链接"},
+    {"blockQuote", &ThemePalette::blockQuote, "引用"},
+    {"listMarker", &ThemePalette::listMarker, "列表标记"},
+    {"codeBlockForeground", &ThemePalette::codeBlockForeground, "代码块文字"},
+    {"codeBlockBackground", &ThemePalette::codeBlockBackground, "代码块底色"},
+};
+
+}  // namespace
+
+QJsonObject ThemePalette::toJson() const
+{
+    QJsonObject obj;
+    for (const FieldSpec &f : kFields) {
+        obj.insert(QString::fromLatin1(f.key), (this->*f.member).name());
+    }
+    return obj;
+}
+
+bool ThemePalette::fromJson(const QJsonObject &obj, ThemePalette *out, QString *error)
+{
+    const auto fail = [error](const QString &why) {
+        if (error != nullptr) {
+            *error = why;
+        }
+        return false;
+    };
+
+    if (out == nullptr) {
+        return fail(QStringLiteral("输出参数为空"));
+    }
+
+    // 先全部解析到一个临时对象，**全部通过**才写回 out ——
+    // 这样"导入一半失败"不会留下一个"改了一半"的配色（那比不改还糟）。
+    ThemePalette parsed;
+    for (const FieldSpec &f : kFields) {
+        const QString key = QString::fromLatin1(f.key);
+        if (!obj.contains(key)) {
+            return fail(QStringLiteral("缺少字段 %1（%2）").arg(key, QString::fromLatin1(f.displayName)));
+        }
+        const QJsonValue value = obj.value(key);
+        if (!value.isString()) {
+            return fail(QStringLiteral("字段 %1（%2）不是字符串").arg(key, QString::fromLatin1(f.displayName)));
+        }
+        const QColor color(value.toString());
+        if (!color.isValid()) {
+            return fail(QStringLiteral("字段 %1（%2）不是有效的颜色：%3")
+                            .arg(key, QString::fromLatin1(f.displayName), value.toString()));
+        }
+        parsed.*f.member = color;
+    }
+
+    *out = parsed;
+    return true;
 }
 
 }  // namespace markdown_editor::core::document

@@ -247,6 +247,13 @@ add_test(NAME fulltextsearch COMMAND test_fulltextsearch)
 # "PDF 打出来排版对不对"必须人工看一次（见 README 的验收步骤）。
 add_executable(test_exporter
     test_exporter.cpp
+    # ★ 必须带上 qrc：Exporter 拼 HTML 时要读 ":/html/preview_template.html"
+    #   （导出用的样式就是从预览模板里抽出来的，见 Exporter::standaloneHtml 的注释）。
+    #   少了这一行，资源不存在，Exporter 会静默走"没有模板"的兜底分支 ——
+    #   于是"抽出来的确实是预览用的那份 CSS"这类断言会失败，而失败原因看上去
+    #   像样式抽取写错了，其实只是资源没编进来。test_syncbridge / test_codehighlighter
+    #   是同样的写法（它们也要读同一个 .qrc）。
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
 target_link_libraries(test_exporter
     ui
@@ -334,6 +341,12 @@ add_test(NAME sessionstate COMMAND test_sessionstate)
 # 因为 QWebEngineView 在受控环境里起不来 —— 需要人工确认的项会在输出里标成 MANUAL。
 add_executable(test_endtoend
     test_endtoend.cpp
+    # ★ 必须带上 qrc：第 8 步要断言"亮/暗 QSS 真的应用到了 QApplication 上"，
+    #   而两份 QSS 是资源（:/styles/light.qss、:/styles/dark.qss）。
+    #   资源没编进来时 ThemeManager::styleSheetFor() 只能返回兜底串，
+    #   于是那两条断言失败 —— 看上去像"主题没切"，其实只是资源缺失。
+    #   test_syncbridge / test_codehighlighter / test_exporter 是同样的写法。
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
 target_link_libraries(test_endtoend
     business
@@ -361,11 +374,92 @@ target_link_libraries(test_syncscheduler
 )
 add_test(NAME syncscheduler COMMAND test_syncscheduler)
 
+# ---------------- SearchIndexWorker 契约测试（A1 后台索引）----------------
+# 需要 QCoreApplication（里面用了 QThread + 事件循环）和 Qt6::Sql（索引是真的 SQLite）。
+# 不需要 QApplication：SearchIndexWorker 不依赖 QWidget（本项目的既有惯例），
+# 所以这个测试不拉 Chromium、能毫秒级跑完。
+add_executable(test_searchindexworker
+    test_searchindexworker.cpp
+)
+target_link_libraries(test_searchindexworker
+    business
+    Qt6::Core
+    Qt6::Sql
+)
+add_test(NAME searchindexworker COMMAND test_searchindexworker)
+
+# ---------------- DraftRecovery 契约测试（A3 崩溃恢复）----------------
+# 纯逻辑：只依赖 core_storage（FileUtils 的原子写）+ Qt6::Core。
+# 不需要 QApplication —— 这正是"可靠性逻辑抽成不依赖界面的类"的回报。
+add_executable(test_draftrecovery
+    test_draftrecovery.cpp
+)
+target_link_libraries(test_draftrecovery
+    core_storage
+    infrastructure
+    Qt6::Core
+)
+add_test(NAME draftrecovery COMMAND test_draftrecovery)
+
+# ---------------- LineDiff 契约测试（B1 自研行级 diff）----------------
+# 纯算法：只需要 core_document + Qt6::Core。**不要 Widgets**。
+# 这正是把 diff 放进 core/document 的回报：这个测试不用 QApplication、不拉 Chromium，
+# 毫秒级跑完，却能覆盖 40 组随机对拍（对称性 / 最小性 / 结构 / 还原）。
+# 对拍用的 `git diff --no-index --numstat` 是可选的：本机没装 git 就跳过那一节，
+# 不把 git 变成跑测试的硬依赖。
+add_executable(test_linediff
+    test_linediff.cpp
+)
+target_link_libraries(test_linediff
+    core_document
+    Qt6::Core
+)
+add_test(NAME linediff COMMAND test_linediff)
+
+# ---------------- 大纲（C4）----------------
+# ★ 这个测试**故意只链 core_document + Qt6::Core**：大纲的规则部分是纯函数
+#   （src/core/document/markdownoutline.cpp），所以它不用 QApplication、不拉 Chromium，
+#   毫秒级跑完。这是"规则下沉到 core / 界面留在 business"这条分工的实际回报 ——
+#   同一份规则要是写在面板里，这个测试就得起一个窗口。
+# 面板那一半（真父子树、空状态、暂停态）在 test_outlinepanel 里，那个才需要 Widgets。
+add_executable(test_outline
+    test_outline.cpp
+)
+target_link_libraries(test_outline
+    core_document
+    Qt6::Core
+)
+add_test(NAME outline COMMAND test_outline)
+
+# ---------------- 大纲面板（C4）----------------
+# 需要 Qt6::Widgets（QTreeWidget / QLabel）。测的是"标题列表 → 树"这一步：
+# 真父子关系（## 挂在最近的 # 下面）、行号存进 UserRole、空状态与暂停态。
+add_executable(test_outlinepanel
+    test_outlinepanel.cpp
+)
+target_link_libraries(test_outlinepanel
+    business
+    Qt6::Widgets
+)
+add_test(NAME outlinepanel COMMAND test_outlinepanel)
+
+# ---------------- 写作统计（C5）----------------
+# 同样是纯函数、同样**不需要 Widgets**：口径（词/段/句怎么算）是这条测试真正守的东西。
+# 口径一旦漂了，用户看到的字数就变了，而没人会立刻发现 —— 所以要用断言钉住。
+add_executable(test_textstats
+    test_textstats.cpp
+)
+target_link_libraries(test_textstats
+    core_document
+    Qt6::Core
+)
+add_test(NAME textstats COMMAND test_textstats)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch exporter codehighlighter thememanager mainwindowlayout sessionstate endtoend syncscheduler PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager draftrecovery linediff outline textstats editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch searchindexworker outlinepanel exporter codehighlighter thememanager mainwindowlayout sessionstate endtoend syncscheduler PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

@@ -1,7 +1,9 @@
 #ifndef TABMANAGER_H
 #define TABMANAGER_H
 
+#include <QDateTime>
 #include <QHash>
+#include <QList>
 #include <QString>
 #include <QStringList>
 #include <QTabWidget>
@@ -43,6 +45,22 @@ public:
         bool modified = false;         // 有未保存修改时标题后面加 *
         QString title;                 // 可选：自定义标题（给"未命名 2"这种用）
     };
+
+    // 最近关掉的一个标签（C3：Ctrl+Shift+T 重开）。
+    //
+    // ⚠️ **只记有路径的标签**。没保存过的新文档关掉之后内容就真的没了（我们没留副本），
+    // 把它放进"可重开"的栈里会给用户一个假的承诺：按 Ctrl+Shift+T 期待那半页字回来，
+    // 结果弹出一个空标签 —— 这比"按钮是灰的"更糟。所以没路径的直接不进栈。
+    struct ClosedTab
+    {
+        QString filePath;                    // 一定是非空路径
+        QString displayName;                 // 关闭时标签上的名字（提示语里用）
+        bool hadUnsavedChanges = false;      // 关的时候还带着未保存的修改
+        QDateTime closedAt;                  // 什么时候关的（提示语里说清楚是哪一个）
+    };
+
+    // 栈的深度：再多也没什么意义（人会忘，路子也该往回翻了）
+    static constexpr int kMaxClosedTabs = 10;
 
     explicit TabManager(QWidget *parent = nullptr);
 
@@ -87,7 +105,29 @@ public:
     // 当前所有标签的标题，按显示顺序。用于会话恢复/调试。
     QStringList tabTitles() const;
 
+    // ============================ 最近关闭（C3）============================
+    // 栈的语义：**后关的在前面**（prepend），所以 takeLastClosedTab() 弹出来的是
+    // "最近关掉的那一个"，连按 N 次就是"逆序恢复"，和浏览器 Ctrl+Shift+T 一致。
+    //
+    // 为什么这条栈放在 TabManager 而不是主窗口：
+    //   所有关闭路径（× 按钮、菜单「关闭当前标签」、关闭其它/右侧/全部）最后都汇到
+    //   closeTab()。放在这里，"记录"只需要写一处；放在主窗口就得在五六个入口各记一遍，
+    //   将来加一个入口就会漏。
+    bool canReopenClosedTab() const { return !m_closedTabs.isEmpty(); }
+
+    // 弹出最近关闭的那条（栈空时返回一个 filePath 为空的记录）。
+    // 这里是**弹出**不是"查看"：重开失败（文件被删/改名）也照样消耗掉一条 ——
+    // 那条记录再留着也开不出来，只会让下一次 Ctrl+Shift+T 反复失败。
+    ClosedTab takeLastClosedTab();
+
+    // 当前栈里的内容（最近的在前）。给测试用；界面不需要看全栈。
+    QList<ClosedTab> closedTabs() const { return m_closedTabs; }
+
 signals:
+    // 能不能重开的状态变了（0 条 ↔ 有 1 条以上）。动作的可用性直接挂在这上面，
+    // 而不是每次关闭都无脑 setEnabled(true) —— 那样"没历史时按钮是灰的"就成了靠运气。
+    void closedTabAvailabilityChanged(bool canReopen);
+
     // 当前标签换了（编辑器指针；没有标签时是 nullptr）。
     // 主窗口用它来切换预览内容、标题栏、状态栏。
     void currentEditorChanged(EditorWidget *editor);
@@ -108,10 +148,18 @@ private:
     {
         QString filePath;
         QString fileName;
+        // 关闭时要不要提醒"你当时有没保存的东西"（C3）。
+        // 记在这里而不是现问编辑器：closeTab() 会把页面 delete 掉，
+        // 那时候再去问编辑器就晚了。updateTab() 是唯一的写入点。
+        bool modified = false;
     };
+
+    // 关掉 index 之前把它的信息压进"最近关闭"栈（没有路径就不压，理由见 ClosedTab 的注释）。
+    void recordClosedTab(int index);
 
     CloseConfirmHandler m_closeConfirm;
     QHash<const EditorWidget *, TabMeta> m_meta;  // 键是那个编辑器
+    QList<ClosedTab> m_closedTabs;                // 最近的在前
 };
 
 #endif // TABMANAGER_H

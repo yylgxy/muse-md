@@ -105,6 +105,12 @@ EditorWidget::EditorWidget(QWidget *parent) : QPlainTextEdit(parent)
     // 正解是让**控件本身**没有边框，而不是再用 QSS 去压它。
     setFrameShape(QFrame::NoFrame);
 
+    // 焦点模式的淡化色（C5）：半透明的灰（alpha 90 ≈ 35%）。
+    // 为什么必须半透明、而且不写死成某个主题色：extraSelection 画在语法高亮**之上**，
+    // 不透明的浅色会把标题蓝、代码块里的字整片盖掉 —— 那就不是"淡化"而是"涂掉"了。
+    // 半透明的灰在亮色 / 暗色底上都表现为"这几行退到背景里"，所以与主题无关。
+    m_dimColor = QColor(128, 128, 128, 90);
+
     // ---- 2b. 帧统计（性能排查）----
     // 滚动时每帧都会走到 updateLineNumberArea，那里只记一个时间戳；
     // 这里负责"停手之后报一次"。300ms 的静默判定和"输入停止才渲染"是同一个思路：
@@ -486,7 +492,7 @@ int EditorWidget::lineNumberAtY(int y) const
     return lines;
 }
 
-void EditorWidget::goToLine(int line, int column)
+void EditorWidget::goToLine(int line, int column, int selectChars)
 {
     const int blocks = document()->blockCount();
     if (blocks <= 0) {
@@ -502,6 +508,27 @@ void EditorWidget::goToLine(int line, int column)
     const int maxColumn = qMax(0, cursor.block().length() - 1);
     const int offset = qBound(0, column - 1, maxColumn);
     cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::MoveAnchor, offset);
+
+    // C1 搜索结果高亮：跳过去之后顺便把命中的那几个字符选中。
+    //
+    // 为什么用"选中"而不是"在编辑器里画一个背景色"：
+    //   * 选中是 QPlainTextEdit 自带的、和鼠标选择完全一致的表现，用户一眼就懂
+    //     （"跳过来并且选中了这个词"就是浏览器的 Ctrl+F 行为）；
+    //   * 自己加 extraSelection 要处理"用户一点别处就得清掉"的生命周期问题，
+    //     而 setTextCursor 的选择区天然会被下一次点击/输入替换掉 —— 不用管。
+    //
+    // 夹到行末：搜索结果给的 matchLength 一定落在那一行内，但调用方（尤其是以后
+    // 可能出现的"跨行匹配"）传大了不该越界跑到下一行去。
+    if (selectChars > 0) {
+        // 本行最后一个字符之后的位置（不含块尾的段落分隔符，所以是 +maxColumn 而不是 +maxColumn+1，
+        // 否则"选中到行尾"会把换行符也圈进去，视觉上多选了一个字符）。
+        const int lineEnd = cursor.block().position() + maxColumn;
+        const int anchor = cursor.position();
+        const int end = qMin(anchor + selectChars, lineEnd);
+        if (end > anchor) {
+            cursor.setPosition(end, QTextCursor::KeepAnchor);
+        }
+    }
 
     setTextCursor(cursor);
     centerCursor();  // 让目标行落在屏幕中间，而不是贴着上边缘
@@ -581,6 +608,13 @@ void EditorWidget::updateLineNumberArea(const QRect &rect, int dy)
 
     if (dy != 0) {
         m_lineNumberArea->scroll(0, dy);  // 整体滚动：行号跟着挪，不用重画
+        // 焦点模式：淡化的是"视口内的行"，滚动会换掉视口内容，所以必须重算。
+        // 只在 dy != 0 时算 —— setExtraSelections() 自己会请求重绘（dy == 0 的那次），
+        // 在这里无脑重算就会变成"重算 -> 重绘 -> 重算"的循环。
+        // 重算只碰约几十行（视口范围内），所以滚动时这条路径是廉价的。
+        if (m_focusMode) {
+            updateExtraSelections();
+        }
     } else {
         m_lineNumberArea->update(0, rect.y(), m_lineNumberArea->width(), rect.height());
     }
@@ -669,18 +703,7 @@ void EditorWidget::paintLineNumbers(QPaintEvent *event)
 
 void EditorWidget::refreshCurrentLine()
 {
-    // 当前行高亮用 ExtraSelection：这是 QPlainTextEdit 自带的机制，
-    // 不用去覆写 paintEvent（覆写会把光标、选区、输入法那一堆绘制逻辑全打乱）。
-    QList<QTextEdit::ExtraSelection> selections;
-    if (!isReadOnly()) {
-        QTextEdit::ExtraSelection selection;
-        selection.format.setBackground(m_currentLineColor);
-        selection.format.setProperty(QTextFormat::FullWidthSelection, true);  // 铺满整行，而不是只到行尾
-        selection.cursor = textCursor();
-        selection.cursor.clearSelection();
-        selections.append(selection);
-    }
-    setExtraSelections(selections);
+    updateExtraSelections();
 
     // 行号栏里"当前行加粗"要跟着换，重画一次
     if (m_lineNumberArea != nullptr) {
@@ -690,6 +713,134 @@ void EditorWidget::refreshCurrentLine()
     // 行列都从 1 起算：状态栏直接显示，界面层不用再想 0/1 转换
     const QTextCursor cursor = textCursor();
     emit cursorMoved(cursor.blockNumber() + 1, cursor.positionInBlock() + 1);
+}
+
+// ============================================================================
+// 焦点模式（C5）
+// ============================================================================
+
+void EditorWidget::setFocusMode(bool on)
+{
+    if (m_focusMode == on) {
+        return;
+    }
+    m_focusMode = on;
+    // 立刻重画一次：不重建的话，开关动作要等到下一次光标移动才看得见效果。
+    updateExtraSelections();
+}
+
+QList<EditorWidget::LineRange> EditorWidget::dimRanges(int firstVisible, int lastVisible, int paragraphFirst,
+                                                       int paragraphLast)
+{
+    QList<LineRange> ranges;
+    if (firstVisible < 1 || lastVisible < firstVisible) {
+        return ranges;  // 视口里什么都没有（窗口还没布局完）
+    }
+
+    // 把段落范围夹到视口内，再对 [视口] 做一次"区间减法"。
+    // 夹这一下是关键：段落可能整个在视口上方/下方（滚动之后很常见），
+    // 不夹的话会算出 first > last 这种反向区间，画出来是一整条错误的高亮。
+    const int clampedFirst = qMax(paragraphFirst, firstVisible);
+    const int clampedLast = qMin(paragraphLast, lastVisible);
+
+    if (clampedFirst > clampedLast) {
+        // 段落完全不在视口里 -> 视口内每一行都淡化
+        ranges.append({firstVisible, lastVisible});
+        return ranges;
+    }
+    if (clampedFirst > firstVisible) {
+        ranges.append({firstVisible, clampedFirst - 1});  // 段落上面那一段
+    }
+    if (clampedLast < lastVisible) {
+        ranges.append({clampedLast + 1, lastVisible});  // 段落下面那一段
+    }
+    return ranges;
+}
+
+int EditorWidget::paragraphFirstLine(int blockNumber) const
+{
+    QTextBlock block = document()->findBlockByNumber(blockNumber);
+    if (!block.isValid()) {
+        return 1;
+    }
+    // 往上走到空行（或文档开头）为止
+    while (block.previous().isValid() && !block.previous().text().trimmed().isEmpty()) {
+        block = block.previous();
+    }
+    return block.blockNumber() + 1;
+}
+
+int EditorWidget::paragraphLastLine(int blockNumber) const
+{
+    QTextBlock block = document()->findBlockByNumber(blockNumber);
+    if (!block.isValid()) {
+        return 1;
+    }
+    while (block.next().isValid() && !block.next().text().trimmed().isEmpty()) {
+        block = block.next();
+    }
+    return block.blockNumber() + 1;
+}
+
+void EditorWidget::updateExtraSelections()
+{
+    QList<QTextEdit::ExtraSelection> selections;
+    const QTextCursor cursor = textCursor();
+
+    // ---- 1) 当前行高亮 ----
+    // 用 ExtraSelection 是 QPlainTextEdit 自带的机制，不用去覆写 paintEvent
+    //（覆写会把光标、选区、输入法那一堆绘制逻辑全打乱）。
+    if (!isReadOnly()) {
+        QTextEdit::ExtraSelection selection;
+        selection.format.setBackground(m_currentLineColor);
+        selection.format.setProperty(QTextFormat::FullWidthSelection, true);  // 铺满整行，而不是只到行尾
+        selection.cursor = cursor;
+        selection.cursor.clearSelection();
+        selections.append(selection);
+    }
+
+    // ---- 2) 焦点模式：淡化"当前段落之外"的行 ----
+    if (m_focusMode && !isReadOnly()) {
+        // 视口内的第一行 / 最后一行。
+        // ★ 只算视口内的：extraSelection 是覆盖全文档的，几千段的长文里一次构造几千个
+        //   选区，每滚动一格就要重算一次 —— 那是"看起来能用、滚起来卡"的典型写法。
+        int firstVisible = -1;
+        int lastVisible = -1;
+        for (QTextBlock block = firstVisibleBlock(); block.isValid(); block = block.next()) {
+            const QRectF rect = blockBoundingGeometry(block).translated(contentOffset());
+            if (rect.top() > viewport()->height()) {
+                break;  // 已经到视口下面了
+            }
+            if (rect.bottom() >= 0) {
+                if (firstVisible < 0) {
+                    firstVisible = block.blockNumber() + 1;
+                }
+                lastVisible = block.blockNumber() + 1;
+            }
+        }
+
+        const int currentBlock = cursor.blockNumber();
+        const QList<LineRange> ranges = dimRanges(firstVisible, lastVisible, paragraphFirstLine(currentBlock),
+                                                 paragraphLastLine(currentBlock));
+        for (const LineRange &range : ranges) {
+            const QTextBlock first = document()->findBlockByNumber(range.first - 1);
+            const QTextBlock last = document()->findBlockByNumber(range.last - 1);
+            if (!first.isValid() || !last.isValid()) {
+                continue;
+            }
+            QTextEdit::ExtraSelection selection;
+            // 只设前景色（不设背景）：背景留给"当前行高亮"和代码块底色，
+            // 否则淡化区会把代码块背景抹掉，看起来像渲染坏了。
+            selection.format.setForeground(m_dimColor);
+            selection.cursor = QTextCursor(document());
+            selection.cursor.setPosition(first.position());
+            // 选区到"最后一块的末尾"为止（不含段落分隔符，否则会把下一行的第一个字符也选中）
+            selection.cursor.setPosition(last.position() + last.length(), QTextCursor::KeepAnchor);
+            selections.append(selection);
+        }
+    }
+
+    setExtraSelections(selections);
 }
 
 QString EditorWidget::currentLineText() const

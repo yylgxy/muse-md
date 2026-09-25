@@ -12,6 +12,8 @@
 #include "recentfiles.h"
 #include "syncbridge.h"      // 帧统计：预览网页报回来的数据走它        // 5.4.2：最近打开的文件列表
 #include "searchpanel.h"        // 5.5：全文搜索面板（.ui 里就是一个 SearchPanel）
+#include "outlinepanel.h"       // C4：大纲面板（.ui 里就是一个 OutlinePanel）
+#include "textstats.h"          // C5：写作统计（纯函数，进 core/document）
 #include "tabmanager.h"
 #include "thememanager.h"      // 5.7：亮暗主题（单例）
 
@@ -58,6 +60,9 @@ using markdown_editor::core::document::SyncBridge;  // 帧统计：预览网页�
 using markdown_editor::core::document::CodeHighlighter;
 // 主题配色（5.7）：ThemeManager 是全局命名空间的类，但它返回的配色表在 core::document 里
 using markdown_editor::core::document::ThemePalette;
+// 自研行级 diff（B1）："与上一版对比"改用它（本地算法 + 结构化结果）
+using markdown_editor::core::document::LineDiff;
+using markdown_editor::core::document::TextStats;  // C5：写作统计（纯函数）
 // 注意：FileManager 不用在这里 using —— MainWindow 内部有一份同名别名（见 mainwindow.h），
 // 成员函数体里直接用短名字就行，不会和全局作用域冲突。
 // 预览渲染管线与同步桥也不在这里了：它们归 EditorWorkbench 所有。
@@ -249,6 +254,33 @@ void MainWindow::initUi()
     // 默认不占地方：菜单「视图 → 全文搜索」或 Ctrl+Shift+F 打开（和主流编辑器一致）
     ui->searchDock->hide();
     syncSearchDirectoryToSidebar();
+
+    // ---- 大纲面板（C4）----
+    // 和文件树**叠在同一个停靠区**（左侧），底部多一个页签切换"文件 / 大纲"。
+    // 这样三栏布局（侧栏 + 编辑器 + 预览）一点没动 —— 多开一列就破了当时的设计稿约束。
+    //
+    // ⚠️ 三行的顺序不能换：tabifyDockWidget → raise() → hide()。
+    //    raise() 决定的是"这一叠里默认显示哪一页"，hide() 决定"整叠默认收不收起来"。
+    //    先 hide 再 raise 会得到"动作勾上了、面板却看不见"（raise 只切页签、不改可见性）。
+    tabifyDockWidget(ui->fileTreeDock, ui->outlineDock);
+    ui->fileTreeDock->raise();  // 默认停在"文件"那一页
+    ui->outlineDock->hide();    // 和搜索面板一致：默认不占地方
+
+    // 面板只发"用户点了这一行"；跳到哪、怎么跳是主窗口的事（和 SearchPanel 同一分工）。
+    connect(ui->outlinePanel, &OutlinePanel::lineActivated, this, &MainWindow::onOutlineLineActivated);
+    connect(ui->outlinePanel, &OutlinePanel::statusMessage, this, [this](const QString &text) {
+        statusBar()->showMessage(text, 8000);
+    });
+
+    // 大纲刷新的第三条路径：打字。这里是**唯一的连接点**（不要挪到 connectSession 里 ——
+    // 那会在每个标签上各连一份，标签一多就重复触发）。
+    m_outlineTimer.setSingleShot(true);
+    m_outlineTimer.setInterval(300);  // 打字停手 300ms 才扫一次全文
+    connect(&m_outlineTimer, &QTimer::timeout, this, [this] {
+        // ★ 现读 currentEditor()，**不要**在别处捕获具体 editor：
+        //   定时器活得比一次切换久，捕获了就会把大纲刷成上一个文档的内容。
+        refreshOutline(currentEditor());
+    });
 }
 
 // 菜单/工具栏/动作：这些用 .ui 表达不了 ——
@@ -335,6 +367,22 @@ void MainWindow::initMenuBar()
     m_closeTabAction->setShortcut(QKeySequence::Close);
     connect(m_closeTabAction, &QAction::triggered, this, &MainWindow::onCloseTab);
 
+    // ---- 重开刚关掉的标签（C3）----
+    //
+    // Ctrl+Shift+T 是被"抢"过来的：它原来挂在工具栏的「暗色主题」上，主题挪到 Ctrl+Shift+D。
+    // 理由：同一个 QKeySequence 装在两个 QAction 上，Qt 只会发 activatedAmbiguously，
+    // **两个动作都不稳定**（有时这个生效、有时那个，还可能都不生效）；
+    // 而"重开刚关掉的标签"是全平台（浏览器、编辑器）都这么用的手势，用户的手指是有肌肉记忆的，
+    // 主题切换没有这种约定 —— 所以按"通用约定优先于历史选择"来取舍。
+    // 这处取舍要同步到 README 与 docs/UI_DESIGN_SPEC.md 的快捷键表，否则文档就在骗人。
+    m_reopenTabAction = tabMenu->addAction(QStringLiteral("重新打开关闭的标签(&R)"));
+    m_reopenTabAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));
+    m_reopenTabAction->setStatusTip(QStringLiteral("重开最近关掉的那个标签（Ctrl+Shift+T）"));
+    m_reopenTabAction->setEnabled(false);  // 还没关过东西，没什么可重开的
+    connect(m_reopenTabAction, &QAction::triggered, this, &MainWindow::onReopenClosedTab);
+    // 可用性由栈的状态推着走，不在这里猜（见 TabManager::closedTabAvailabilityChanged）
+    connect(ui->tabManager, &TabManager::closedTabAvailabilityChanged, m_reopenTabAction, &QAction::setEnabled);
+
     tabMenu->addSeparator();
     // Ctrl+Tab / Ctrl+Shift+Tab 是编辑器的通用习惯，QTabWidget 本身不带，这里补上
     m_nextTabAction = tabMenu->addAction(QStringLiteral("下一个标签(&N)"));
@@ -403,6 +451,33 @@ void MainWindow::initMenuBar()
     // 不会来回递归：setChecked 只有在状态真的变了时才发 toggled。
     connect(ui->searchDock, &QDockWidget::visibilityChanged, m_searchAction, &QAction::setChecked);
 
+    // ---- 大纲面板（C4）----
+    // 和文件树叠在同一个停靠区，所以这里不需要"关掉文件树"之类的联动 ——
+    // 两个面板的可见性是同一个 QDockWidget 叠层里的两页，各自独立记着。
+    m_outlineAction = viewMenu->addAction(QStringLiteral("大纲面板(&O)"));
+    m_outlineAction->setCheckable(true);
+    m_outlineAction->setStatusTip(QStringLiteral("显示/隐藏文档大纲面板"));
+    connect(m_outlineAction, &QAction::toggled, this, [this](bool visible) {
+        ui->outlineDock->setVisible(visible);
+        if (visible) {
+            ui->outlineDock->raise();  // 勾选 = 想看它，所以顺便把它这一页翻到前面来
+        }
+    });
+    // 用户直接点页签切到大纲（或点 × 收起）时，菜单上的勾也要跟上，两边不能不一致。
+    connect(ui->outlineDock, &QDockWidget::visibilityChanged, m_outlineAction, &QAction::setChecked);
+
+    // ---- 焦点模式（C5）----
+    // 只留当前段落、把别的行淡化。这是"写东西时不想被别的内容分散注意力"的诉求，
+    // 所以它是个开关，不是模式切换 —— 勾上/取消随时可以。
+    //
+    // 状态由主窗口持有（m_focusMode），因为**焦点模式是每个编辑器各自的属性**：
+    // 切标签时要把它补到新标签上（见 onCurrentTabChanged），否则会出现
+    // "在 A 标签勾了，切到 B 标签发现没生效、切回来又还在"这种不一致。
+    m_focusModeAction = viewMenu->addAction(QStringLiteral("焦点模式(&F)"));
+    m_focusModeAction->setCheckable(true);
+    m_focusModeAction->setStatusTip(QStringLiteral("只保留当前段落，其余行淡化"));
+    connect(m_focusModeAction, &QAction::toggled, this, &MainWindow::onFocusModeToggled);
+
     // ---- 主题（5.7）----
     // 视图 → 主题 → 亮色 / 暗色。切换只调 ThemeManager：它负责 QSS + 调色板 + 落盘 + 发信号，
     // 本窗口和编辑器、预览区都只是"响应者"，不需要互相知道对方也要换色。
@@ -416,17 +491,45 @@ void MainWindow::initMenuBar()
     m_themeGroup->addAction(m_themeLightAction);
     connect(m_themeLightAction, &QAction::triggered, this, [this] {
         Q_UNUSED(this);
+        // 选内置主题 = 退出自定义主题（否则自定义配色会盖住亮色的编辑器配色）
+        ThemeManager::instance().clearCustomTheme();
         ThemeManager::instance().setTheme(ThemeManager::Theme::Light);
     });
 
     m_themeDarkAction = themeMenu->addAction(QStringLiteral("暗色(&D)"));
-    m_themeDarkAction->setStatusTip(QStringLiteral("切到暗色主题（Ctrl+Shift+T）"));
+    m_themeDarkAction->setStatusTip(QStringLiteral("切到暗色主题（Ctrl+Shift+D）"));
     m_themeDarkAction->setCheckable(true);
     m_themeGroup->addAction(m_themeDarkAction);
     connect(m_themeDarkAction, &QAction::triggered, this, [this] {
         Q_UNUSED(this);
+        ThemeManager::instance().clearCustomTheme();
         ThemeManager::instance().setTheme(ThemeManager::Theme::Dark);
     });
+
+    // ---- 主题导入导出（C7）----
+    // 动态列出已导入的自定义主题 + 分隔线 + 导入/导出。
+    // 选一个自定义主题 = 控件外观跟暗色、编辑器配色换成自定义那份（见 applyCustomTheme 的取舍说明）。
+    themeMenu->addSeparator();
+    const auto customThemes = ThemeManager::instance().customThemes();
+    for (const auto &pair : customThemes) {
+        QAction *custom = themeMenu->addAction(pair.first);
+        const QString path = pair.second;
+        connect(custom, &QAction::triggered, this, [this, path] {
+            QString error;
+            const auto palette = ThemeManager::paletteFromFile(path, &error);
+            if (!error.isEmpty()) {
+                statusBar()->showMessage(QStringLiteral("读主题失败：%1").arg(error), 5000);
+                return;
+            }
+            ThemeManager::instance().applyCustomTheme(palette, ThemeManager::Theme::Dark);
+        });
+    }
+    m_importThemeAction = themeMenu->addAction(QStringLiteral("导入主题…(&I)"));
+    m_importThemeAction->setStatusTip(QStringLiteral("从 JSON 文件导入一套编辑器配色"));
+    connect(m_importThemeAction, &QAction::triggered, this, &MainWindow::onImportTheme);
+    m_exportThemeAction = themeMenu->addAction(QStringLiteral("导出当前主题…(&E)"));
+    m_exportThemeAction->setStatusTip(QStringLiteral("把当前编辑器配色导出成 JSON 文件"));
+    connect(m_exportThemeAction, &QAction::triggered, this, &MainWindow::onExportTheme);
 
     // ---- 工具菜单 ----
     QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
@@ -439,6 +542,15 @@ void MainWindow::initMenuBar()
     toolsMenu->addSeparator();
     QAction *insertCodeAction = toolsMenu->addAction(QStringLiteral("插入代码块(&K)…"));
     connect(insertCodeAction, &QAction::triggered, this, &MainWindow::onInsertCodeBlock);
+
+    // ---- 写作统计（C5）----
+    // ⚠️ 刻意做成"点一下才算"：统计要遍历全文，而它每次按键都会变。放进状态栏实时刷
+    //   就等于给打字加一条 O(全文) 的尾巴（还得再加一个定时器去节流）。
+    //   状态栏继续用它已有的 O(1) 字符数；想看详细数字时点这一项。
+    //   这样统计功能对打字延迟的影响是零，代价只是数字要手点一下才刷新。
+    QAction *statsAction = toolsMenu->addAction(QStringLiteral("写作统计(&S)…"));
+    statsAction->setStatusTip(QStringLiteral("字符 / 词 / 段 / 句 / 阅读时长（点击时才计算）"));
+    connect(statsAction, &QAction::triggered, this, &MainWindow::onShowTextStats);
 
     // ---- 帮助菜单 ----
     QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
@@ -545,8 +657,9 @@ void MainWindow::initToolBar()
 
     m_darkThemeAction = toolBar->addAction(QStringLiteral("暗色主题"));
     m_darkThemeAction->setCheckable(true);
-    m_darkThemeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));  // 6.2：切换主题
-    m_darkThemeAction->setToolTip(QStringLiteral("在亮色 / 暗色主题之间切换（Ctrl+Shift+T）"));
+    // 6.2 起这里是 Ctrl+Shift+T，C3 让给了「重开关闭的标签」—— 理由见 initMenuBar 里那段注释。
+    m_darkThemeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
+    m_darkThemeAction->setToolTip(QStringLiteral("在亮色 / 暗色主题之间切换（Ctrl+Shift+D）"));
     connect(m_darkThemeAction, &QAction::toggled, this, [this](bool dark) {
         ThemeManager::instance().setTheme(dark ? ThemeManager::Theme::Dark : ThemeManager::Theme::Light);
     });
@@ -646,7 +759,8 @@ EditorWidget *MainWindow::createSession()
 
     // 新标签也要跟上当前主题：EditorWidget 自己是从亮色起步的，
     // 开机时如果用户用的是暗色主题，这里得把它按当前主题刷一遍。
-    editor->setThemePalette(ThemeManager::editorPalette(ThemeManager::instance().theme()));
+    // 用 currentPalette() 而不是 editorPalette(theme)：有自定义主题时要跟着用自定义配色。
+    editor->setThemePalette(ThemeManager::instance().currentPalette());
 
     m_sessions.insert(editor, files);
     connectSession(editor, files);
@@ -774,6 +888,79 @@ void MainWindow::updateTabLabel(FileManager *files)
     // 用合成判断：同步还没跑（打字后 150ms 内）也要能看出"有未保存的修改"
     info.modified = isSessionModified(files, editor);
     ui->tabManager->updateTab(ui->tabManager->indexOf(editor), info);
+}
+
+// ============================ C2：每个标签的光标与滚动位置 ============================
+//
+// 要解决的问题：切回来永远是文档开头（showSession() 只推内容）。
+//
+// 两个纯搬运的辅助函数放在文件作用域，是为了让"离开时记"和"退出时记全部"用**同一段代码** ——
+// 两份实现迟早会漂移（比如一处改成记 positionInBlock()、另一处还记着旧字段）。
+
+namespace {
+
+// 把编辑器当前的位置记进表里。path 为空（没保存过的新标签）就不记。
+void recordEditorViewState(QHash<QString, QString> *state, EditorWidget *editor, const QString &path)
+{
+    if (state == nullptr || editor == nullptr || path.isEmpty()) {
+        return;
+    }
+
+    // 行列都转成 1 起算 —— 和状态栏、goToLine、全文搜索全链路一致。
+    // blockNumber() / positionInBlock() 是 0 起算的，转换只在这里和 onCursorMoved 发生。
+    const QTextCursor cursor = editor->textCursor();
+    SessionState::setViewState(state,
+                               path,
+                               cursor.blockNumber() + 1,
+                               cursor.positionInBlock() + 1,
+                               editor->verticalScrollBar()->value());
+}
+
+}  // namespace
+
+void MainWindow::rememberViewState(EditorWidget *editor)
+{
+    if (editor == nullptr) {
+        return;
+    }
+    const FileManager *files = filesFor(editor);
+    if (files == nullptr || !files->hasFilePath()) {
+        return;  // 没保存过的新标签：下次也开不出来，记了没意义（和 recentFiles 的取舍一致）
+    }
+    recordEditorViewState(&m_viewState, editor, files->filePath());
+}
+
+void MainWindow::applyViewState(EditorWidget *editor, const QString &path) const
+{
+    if (editor == nullptr || path.isEmpty()) {
+        return;
+    }
+
+    const auto it = m_viewState.constFind(path);
+    if (it == m_viewState.constEnd()) {
+        return;
+    }
+
+    int line = 0;
+    int column = 1;
+    int scroll = 0;
+    if (!SessionState::parseViewState(it.value(), &line, &column, &scroll)) {
+        return;  // 存坏了 —— 当作"没记过"，退化成文档开头（不报错、不崩）
+    }
+
+    // ★ 顺序：先用 goToLine() 把光标放好，最后再设滚动条的值。
+    //
+    //   goToLine() 内部会 centerCursor()，也就是"把目标行滚到屏幕中间" ——
+    //   如果反过来先设滚动值、再 goToLine()，那次居中会把刚恢复的滚动位置顶掉。
+    //   放在最后，才是"光标在原来的行上、视口在原来的位置"。
+    //
+    //   不传 selectChars：恢复到上次的光标位置不是"找到了什么"，不该选中任何文字。
+    if (line > 0) {
+        editor->goToLine(line, qMax(1, column));
+    }
+
+    // 文档变短时这个值会被 QScrollBar 自己夹到合法范围，不用手动判。
+    editor->verticalScrollBar()->setValue(scroll);
 }
 
 void MainWindow::showSession(FileManager *files, bool forceReload)
@@ -1076,6 +1263,11 @@ void MainWindow::onEditorTextChanged(EditorWidget *editor)
     // 那时候文档管理器里的内容才是最新的，而且渲染管线自己还有 300ms 防抖。
     updateWindowTitle();
     updateDocumentStatus();  // 字符数 / 行数 / 修改状态都是随打字变的
+
+    // 大纲（C4）：打字不能每敲一个字就扫全文，所以只把这个 300ms 的防抖定时器重启一下。
+    // 放在这里而不是在 connectSession 里另连一次 textChanged：那样每个标签都会多一份连接，
+    // 而且"这是不是当前标签"的判断在这里已经做过了，不用再写一遍。
+    m_outlineTimer.start();
 }
 
 // 编辑器内容 → 文档管理器（由节流器在停手之后调用；保存前也会被显式调用）。
@@ -1126,6 +1318,11 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
     // 那时文档管理器里必须是它的最新内容（否则会写盘一个旧版本）。
     m_syncScheduler.flushAll();
 
+    // ★ C2：趁"离开的那个标签"还活着、还显示着，把它的光标与滚动位置记下来。
+    //   必须在下面任何切换动作之前调 —— showSession() 推内容、
+    //   setCurrentEditor() 接滚动条，都会把"它原来在哪"抹掉。
+    rememberViewState(m_lastEditor);
+
     if (editor == nullptr) {
         // 所有标签都被关掉了：立刻补一个干净的新标签。
         // 这样"界面上永远有一个编辑器"这条不变式一直成立，后面所有代码都能少写判空。
@@ -1135,6 +1332,14 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
 
     FileManager *files = filesFor(editor);
     showSession(files, false);  // 同目录时只推内容，不重载页面（不闪白）
+
+    // ★ C2：把"这个标签上次看到哪"摆回去。
+    //   必须在 showSession() **之后** —— showSession() 会推内容进去，
+    //   而推内容（setPlainText）会把光标重置到文档开头。
+    //   顺序反了的话，恢复出来的位置立刻又被顶掉，表现就是"记忆没生效"。
+    if (files != nullptr && files->hasFilePath()) {
+        applyViewState(editor, files->filePath());
+    }
 
     // 告诉工作台"现在编辑的是这个编辑器"：它会接上这个编辑器的滚动条（并断开上一个），
     // 顺便把预览滚到它的当前顶行 —— 这两件事原来散在主窗口里。
@@ -1146,6 +1351,14 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
 
     // 状态栏那一组"当前文档"信息（字符数/路径/修改状态）也要换成这个标签的
     updateDocumentStatus();
+
+    // 大纲（C4）：切标签必须**立刻**换，不等那个 300ms 防抖 ——
+    // 切过去还看着上一个文档的大纲，比没有大纲更糟（会点着它跳到错的文档里）。
+    refreshOutline(editor);
+
+    // 焦点模式（C5）：把"用户要的开关状态"补到这个编辑器上。
+    // 不补的话，新标签会以"关"的状态显示，和菜单上的勾不一致。
+    editor->setFocusMode(m_focusMode);
 
     // 切到这个标签时顺手查一下：这个文件有没有被别的程序改过（7.3）。
     // 放在这里是因为"用户刚把这个文档调到眼前"，此时提示最合时宜。
@@ -1170,6 +1383,11 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
     if (m_copyAction != nullptr) {
         m_copyAction->setEnabled(hasSelection);
     }
+
+    // ★ C2：记下"现在显示的是谁"，下次切走时才能记住它看到哪（见函数开头的 rememberViewState）。
+    //   放在最后：这个函数中间可能提前 return（比如没有标签时去 createSession()），
+    //   那些分支会通过嵌套的 currentChanged 自己走到这里，不该在这里抢答。
+    m_lastEditor = editor;
 }
 
 // 预览里被点了一下。光标是工作台跳的（它知道当前编辑器是谁），主窗口只负责界面表达。
@@ -1197,6 +1415,35 @@ void MainWindow::onViewModeChanged(EditorWorkbench::ViewMode mode)
 void MainWindow::onCloseTab()
 {
     ui->tabManager->requestCloseTab(ui->tabManager->currentIndex());
+}
+
+void MainWindow::onReopenClosedTab()
+{
+    const TabManager::ClosedTab closed = ui->tabManager->takeLastClosedTab();
+    if (closed.filePath.isEmpty()) {
+        return;  // 栈空了。正常情况下动作已经是灰的，这里只是兜底
+    }
+
+    // 时间点写进提示语：连着关了几个标签时，用户按 Ctrl+Shift+T 得知道
+    // "刚回来的是哪一个"，不然只能从标签名去猜。
+    const QString when = closed.closedAt.toString(QStringLiteral("HH:mm:ss"));
+
+    if (!openFile(closed.filePath)) {
+        // openFile 内部已经弹过「打开失败」并说明了原因（被删了 / 没权限 / 是个目录）。
+        // 这里补一句"它是从最近关闭里来的"，免得用户以为是点错了什么菜单。
+        // 记录照旧消耗掉：那条路径已经开不出来了，留着只会让下一次重开再失败一次。
+        statusBar()->showMessage(QStringLiteral("%1 打不开了（它在 %2 被关闭，之后可能被移动或删除）")
+                                     .arg(closed.displayName, when));
+        return;
+    }
+
+    QString message = QStringLiteral("已重新打开 %1（它在 %2 被关闭）").arg(closed.displayName, when);
+    if (closed.hadUnsavedChanges) {
+        // 关的时候用户选了"不保存"。重开拿到的是磁盘上的那一版，
+        // 说清楚这一点，别让人以为关掉的那几行还能回来。
+        message += QStringLiteral("——注意：关闭时未保存的改动不会随它回来");
+    }
+    statusBar()->showMessage(message);
 }
 
 void MainWindow::onNextTab()
@@ -1233,6 +1480,7 @@ void MainWindow::onFileOpened(FileManager *files, const QString &path)
         updateWindowTitle();
         updateCacheStatus();  // 命中/未命中次数刚刚变了
         updateDocumentStatus();  // 路径 / 字符数 / 修改状态
+        refreshOutline(currentEditor());  // C4：换了文档，大纲要跟着换（不等防抖）
     }
 }
 
@@ -1245,7 +1493,123 @@ void MainWindow::onFileSaved(FileManager *files, const QString &path)
         updateWindowTitle();
         updateCacheStatus();  // 保存后缓存里换成了新内容
         updateDocumentStatus();  // 修改状态回到"已保存"，路径也可能刚变（另存为）
+        // C4：另存为会换路径，大纲本身没变，但"这个面板说的是哪个文档"要跟上；
+        // 保存也顺手刷一次，代价只有一次 O(行数) 扫描（正文没变的话结果一模一样）。
+        refreshOutline(currentEditor());
     }
+}
+
+// ============================ 大纲（C4）============================
+
+void MainWindow::refreshOutline(EditorWidget *editor)
+{
+    if (editor == nullptr) {
+        ui->outlinePanel->clear();
+        return;
+    }
+
+    // ★ 大文档保护：超过快速模式阈值就不扫了。
+    //   这不是偷懒 —— EditorWidget 在这个阈值上关语法高亮、预览停止渲染，同一个约束
+    //   （"大文档不能全量处理"）在这里是第三处生效。不拦的话，用户停手 300ms 后要等
+    //   好几秒才有反应，比没有大纲更难受。
+    //   characterCount() 是 O(1)；真正贵的 toPlainText() 只在确认要扫时才调。
+    if (editor->characterCount() > EditorWidget::kFastModeThresholdChars) {
+        ui->outlinePanel->setPaused(true);
+        return;
+    }
+
+    ui->outlinePanel->setSource(editor->toPlainText());
+}
+
+void MainWindow::onOutlineLineActivated(int line)
+{
+    EditorWidget *editor = currentEditor();
+    if (editor == nullptr) {
+        return;  // 没有标签时不该有信号，防御一下
+    }
+
+    // 跳行只有一份实现（EditorWidget::goToLine：夹范围、居中、拿焦点都在里面）。
+    // 预览点击（SyncBridge）、全文搜索（onSearchResultActivated）、大纲 —— 三个调用方
+    // 共用同一个入口，所以"跳到第几行"的行为永远一致。
+    editor->goToLine(line);
+}
+
+// ============================ 焦点模式与写作统计（C5）============================
+
+void MainWindow::onFocusModeToggled(bool on)
+{
+    m_focusMode = on;  // 记住"用户要的是这样"，切标签时补到新标签上
+
+    if (EditorWidget *editor = currentEditor()) {
+        editor->setFocusMode(on);
+    }
+    statusBar()->showMessage(on ? QStringLiteral("焦点模式：只保留当前段落")
+                                : QStringLiteral("焦点模式已关闭"),
+                             5000);
+}
+
+void MainWindow::onShowTextStats()
+{
+    EditorWidget *editor = currentEditor();
+    if (editor == nullptr) {
+        statusBar()->showMessage(QStringLiteral("没有打开的文档"), 5000);
+        return;
+    }
+
+    // 只在用户点了这一下的时候遍历全文（见 initMenuBar 里那段注释：
+    // 放进状态栏实时算就等于给每次按键加一条 O(全文) 的尾巴）。
+    const TextStats stats = TextStats::compute(editor->toPlainText());
+
+    QMessageBox::information(this, QStringLiteral("写作统计"), TextStats::detail(stats));
+    statusBar()->showMessage(TextStats::format(stats), 8000);
+}
+
+// ============================ 主题导入导出（C7）============================
+
+void MainWindow::onImportTheme()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入主题"), QString(),
+        QStringLiteral("主题 JSON (*.json);;所有文件 (*)"));
+
+    if (path.isEmpty()) {
+        return;  // 用户取消了
+    }
+
+    QString error;
+    if (!ThemeManager::instance().importTheme(path, QString(), &error)) {
+        QMessageBox::warning(this, QStringLiteral("导入失败"), error);
+        return;
+    }
+
+    // 导入成功 → 立刻应用（否则用户会困惑"导入了但没变化"）。
+    const auto palette = ThemeManager::paletteFromFile(ThemeManager::instance().importedThemePath());
+    ThemeManager::instance().applyCustomTheme(palette, ThemeManager::Theme::Dark);
+
+    QMessageBox::information(
+        this, QStringLiteral("导入成功"),
+        QStringLiteral("主题已导入并应用。\n\n编辑器的配色换成了新主题，"
+                       "菜单/工具栏等控件外观仍跟随「暗色」。\n"
+                       "想改回内置主题，在「主题」菜单里选亮色或暗色即可。"));
+}
+
+void MainWindow::onExportTheme()
+{
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出当前主题"), QStringLiteral("muse-theme.json"),
+        QStringLiteral("主题 JSON (*.json)"));
+
+    if (path.isEmpty()) {
+        return;
+    }
+
+    QString error;
+    if (!ThemeManager::instance().exportTheme(path, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+        return;
+    }
+
+    statusBar()->showMessage(QStringLiteral("主题已导出到 %1").arg(path), 8000);
 }
 
 void MainWindow::onModificationChanged(FileManager *files, bool modified)
@@ -1495,19 +1859,41 @@ void MainWindow::onDiffWithPrevious()
     const VersionControl::Commit newest = commits.at(0);
     const VersionControl::Commit previous = commits.at(1);
 
-    const QString diffText = history->diff(repoDir, previous.hash, newest.hash, &error);
+    // ★ B1：改走**自研行级 diff**（本地算法 + 结构化结果），不再调 `git diff`。
+    //
+    // 为什么换：我们自己的 LineDiff 给出的 hunks 是结构化的（每块的行号、增删各几行），
+    // 未来要做"带高亮的历史对比视图 / 点一行跳过去"时，直接就能用；
+    // 而 `git diff` 只给一段文本，想拿结构还得把它解析回来。
+    // 另外它不再依赖 git 的输出格式（git 版本 / 语言环境变化都不影响）。
+    //
+    // 语义等价：commits 是"最新在前"的线性历史，所以第 2 条正好是新版的父提交，
+    // diffWithParentLocal(newest) 得到的区间和原来 diff(previous, newest) 完全一致。
+    //
+    // `diffWithParent()`（git 那条路）**保留不动** —— tests/test_versioncontrol.cpp
+    // 还在用它对拍，两条路互相印证比只留一条更可靠。
+    const LineDiff::Result localDiff = history->diffWithParentLocal(repoDir, newest.hash, &error);
     if (!error.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("与上一版对比"), error);
         return;
     }
 
+    // 界面暂时还是"显示一段文本"，所以在这里把结构化结果转回 unified 文本。
+    // 有了结构之后，换成"按块渲染 + 高亮"只是这一步的事，算法那边不用再动。
+    const QStringList oldLines = LineDiff::splitLines(history->contentOf(repoDir, previous.hash));
+    const QStringList newLines = LineDiff::splitLines(history->contentOf(repoDir, newest.hash));
+    const QString diffText = LineDiff::toUnifiedText(localDiff, oldLines, newLines, 3);
+
     showTextDialog(
         QStringLiteral("与上一版对比 — %1").arg(files->fileName()),
-        QStringLiteral("%1（%2） → %3（%4）\n- 开头是上一版的内容，+ 开头是这一版新增的内容")
+        QStringLiteral("%1（%2） → %3（%4）\n"
+                       "- 开头是上一版的内容，+ 开头是这一版新增的内容\n"
+                       "（共 %5 行新增、%6 行删除，由自研行级 diff 计算）")
             .arg(previous.shortHash,
                  previous.time.toString(QStringLiteral("MM-dd HH:mm:ss")),
                  newest.shortHash,
-                 newest.time.toString(QStringLiteral("MM-dd HH:mm:ss"))),
+                 newest.time.toString(QStringLiteral("MM-dd HH:mm:ss")))
+            .arg(localDiff.insertedLines)
+            .arg(localDiff.deletedLines),
         diffText.isEmpty() ? QStringLiteral("（两个版本的内容完全相同）") : diffText);
 }
 
@@ -1594,14 +1980,14 @@ void MainWindow::onRollbackToVersion()
 
 // ============================ 全文搜索（5.5）============================
 //
-// 面板只发"用户点了这个文件的这一行"，剩下的都是主窗口的事：
-// 打开文件（已经开着就直接切过去）、把光标移到那一行、在状态栏说一句。
+// 面板只发"用户点了这条命中"，剩下的都是主窗口的事：
+// 打开文件（已经开着就直接切过去）、把光标移到那一行并**选中命中词**、在状态栏说一句。
 
-void MainWindow::onSearchResultActivated(const QString &filePath, int line)
+void MainWindow::onSearchResultActivated(const SearchHit &hit)
 {
     // openFile() 对"已经打开过的文件"会直接切过去，所以这里不用先判断有没有开过。
     // 打不开时（二进制文件、没权限……）它自己会弹窗说明原因，这里直接收工。
-    if (!openFile(filePath)) {
+    if (!openFile(hit.filePath)) {
         return;
     }
 
@@ -1612,8 +1998,21 @@ void MainWindow::onSearchResultActivated(const QString &filePath, int line)
 
     // 跳行只有一份实现（EditorWidget::goToLine）：夹范围、居中、拿焦点都在里面。
     // 这里传的是搜索结果里的行号，1 起算，和编辑器/状态栏的约定一致。
-    editor->goToLine(line);
-    statusBar()->showMessage(QStringLiteral("已跳到 %1：第 %2 行").arg(QFileInfo(filePath).fileName()).arg(line), 5000);
+    //
+    // ★ C1：把列号和命中长度也传下去 —— 跳过去之后命中词的这几个字会被选中。
+    //   原来的写法只传行号，用户跳过去还停在行首，得自己在这一行里再找一遍。
+    //   hit.matchStart 是 0 起算的下标，而 goToLine 要的是 1 起算的列号，所以 +1；
+    //   没定位到命中时（matchStart == -1）退回"只跳到行首"，不传选区。
+    if (hit.matchStart >= 0 && hit.matchLength > 0) {
+        editor->goToLine(hit.line, hit.matchStart + 1, hit.matchLength);
+    } else {
+        editor->goToLine(hit.line);
+    }
+
+    statusBar()->showMessage(QStringLiteral("已跳到 %1：第 %2 行")
+                                 .arg(QFileInfo(hit.filePath).fileName())
+                                 .arg(hit.line),
+                             5000);
 }
 
 // 搜索面板的目录跟着侧边栏的根目录走：用户在侧边栏里看到哪个目录，
@@ -1799,7 +2198,7 @@ void MainWindow::onThemeChanged(ThemeManager::Theme theme)
         m_themeDarkAction->setChecked(theme == ThemeManager::Theme::Dark);
     }
 
-    const ThemePalette palette = ThemeManager::editorPalette(theme);
+    const ThemePalette palette = ThemeManager::instance().currentPalette();
     for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
         if (it.key() != nullptr) {
             it.key()->setThemePalette(palette);
@@ -1871,7 +2270,9 @@ void MainWindow::updateWindowTitle()
     const QString name = (files == nullptr) ? QStringLiteral("未命名") : files->fileName();
     const bool modified = (files != nullptr) && files->isModified();
 
-    setWindowTitle(QStringLiteral("%1%2 - Markdown 编辑器")
+    // 标题里的产品名统一成 muse-md（D3）：和仓库名、README、安装包一致。
+    // 只改显示，不动 QApplication::applicationName（那是 AppData 路径的一部分，见 main.cpp）。
+    setWindowTitle(QStringLiteral("%1%2 - muse-md")
                        .arg(modified ? QStringLiteral("*") : QString(), name));
 }
 
@@ -1907,8 +2308,8 @@ void MainWindow::onAbout()
 
     QMessageBox::about(
         this,
-        QStringLiteral("关于 Markdown 编辑器"),
-        QStringLiteral("<h3>Markdown 编辑器 %1</h3>"
+        QStringLiteral("关于 muse-md"),
+        QStringLiteral("<h3>muse-md %1</h3>"
                        "<p>一个用 Qt 6 + C++17 写的 Markdown 编辑器，带实时双向预览、"
                        "本地版本历史、全文搜索、代码高亮与亮暗主题。</p>"
                        "<p><b>关于：</b>%2<br/>"
@@ -2030,6 +2431,16 @@ void MainWindow::restoreSession()
     // ---- 停靠面板 ----
     ui->fileTreeDock->setVisible(state.fileTreeVisible);
     ui->searchDock->setVisible(state.searchPanelVisible);
+    // C4：大纲和文件树叠在同一个停靠区，恢复可见性时也要保证"文件树那页在最前面"——
+    // 否则会出现"整叠是显示的、但用户看到的是大纲"，和 fileTreeVisible=true 的语义不符。
+    ui->outlineDock->setVisible(state.outlinePanelVisible);
+    if (!state.outlinePanelVisible) {
+        ui->fileTreeDock->raise();
+    }
+
+    // ---- C2：把每个标签的光标/滚动位置也装进内存 ----
+    // 先装进来，后面 openFile() 触发的 onCurrentTabChanged 走到 applyViewState() 时就有得查了。
+    m_viewState = state.viewState;
 
     // ---- 上次打开的文件 ----
     // 先收集"还存在的"：磁盘上没了的直接跳过（只记一条日志，不弹窗打扰）。
@@ -2068,6 +2479,22 @@ void MainWindow::restoreSession()
     if (state.currentIndex > 0 && state.currentIndex < ui->tabManager->count()) {
         ui->tabManager->setCurrentIndex(state.currentIndex);
     }
+
+    // ★ C2：最后再对**当前这个标签**恢复一次位置。
+    //
+    // 为什么不能只靠 onCurrentTabChanged()：第一个文件是**复用那个空标签**打开的
+    // （见上面 `first->setPlainText(...)`），整个过程没有发生标签切换，
+    // 那条路径就不会被触发，光标会停在文档开头。
+    // 这里补一次，保证"启动后当前标签的位置"一定是对的（重复调用是幂等的：
+    // applyViewState() 只是把光标和滚动条设成记下来的值）。
+    if (EditorWidget *editor = currentEditor()) {
+        if (const FileManager *files = filesFor(editor)) {
+            if (files->hasFilePath()) {
+                applyViewState(editor, files->filePath());
+            }
+        }
+    }
+
     statusBar()->showMessage(QStringLiteral("已恢复上次的会话（%1 个文件）").arg(ui->tabManager->count()), 5000);
 }
 
@@ -2093,6 +2520,24 @@ void MainWindow::saveSession() const
     state.currentIndex = ui->tabManager->currentIndex();
     state.fileTreeVisible = ui->fileTreeDock->isVisible();
     state.searchPanelVisible = ui->searchDock->isVisible();
+    state.outlinePanelVisible = ui->outlineDock->isVisible();
+
+    // ★ C2：把所有标签的光标/滚动位置都记一遍（不只是当前那个）——
+    //   用户关窗口时希望"下次打开每个标签都还在原来的地方"。
+    //   本函数是 const，所以先拷一份内存里的表再往拷本里写，不改窗口的可变状态；
+    //   用 recordEditorViewState() 而不是重写一遍取值逻辑，保证和
+    //   rememberViewState() 永远是同一套规则（行列 1 起算、滚动取 verticalScrollBar）。
+    QHash<QString, QString> viewState = m_viewState;
+    for (int i = 0; i < ui->tabManager->count(); ++i) {
+        EditorWidget *editor = ui->tabManager->editorAt(i);
+        const FileManager *files = filesFor(editor);
+        if (editor == nullptr || files == nullptr || !files->hasFilePath()) {
+            continue;
+        }
+        recordEditorViewState(&viewState, editor, files->filePath());
+    }
+    state.viewState = viewState;
+
     SessionState::save(state);
 }
 

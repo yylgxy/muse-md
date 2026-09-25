@@ -15,6 +15,12 @@ add_library(core_document STATIC
     codehighlighter.cpp
     syncbridge.h
     syncbridge.cpp
+    markdownoutline.h
+    markdownoutline.cpp
+    textstats.h
+    textstats.cpp
+    linediff.h
+    linediff.cpp
     previewrenderer.h
     previewrenderer.cpp
 )

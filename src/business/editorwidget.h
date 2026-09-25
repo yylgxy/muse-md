@@ -91,7 +91,12 @@ public:
     // 并把这一行居中显示、让编辑器拿到焦点。
     // 越界会被夹到合法范围（行夹到 [1, 总行数]，列夹到该行的有效范围），不会崩也不会跳空。
     // "点预览里的某一块"和"点全文搜索的结果"两条路都走这里 —— 跳行只有一份实现。
-    void goToLine(int line, int column = 1);
+    //
+    // selectChars > 0 时，跳过去之后顺便选中这么多字符（C1：搜索结果高亮用它，
+    // 效果就是浏览器的"跳到命中处并选中"，用户一眼就知道找到了哪一段）。
+    // 默认 0 = 只移动光标，保持原来的行为 —— 预览点击那条路完全不受影响。
+    // 选区会被夹在这一行内，不会越过行尾跑到下一行。
+    void goToLine(int line, int column = 1, int selectChars = 0);
 
     // 插入一个代码块围栏（```语言 … ```），光标停在代码区第一行。
     // language 就是 Markdown 里写在围栏后面的那个语言名（python/cpp/…），
@@ -173,6 +178,36 @@ public:
     void setHighlightingEnabled(bool enabled);
     bool isHighlightingEnabled() const;
 
+    // ============================ 焦点模式（C5）============================
+
+    // 焦点模式：把**当前段落之外**的行淡化，只留下正在写的那一段。
+    //
+    // 实现要点（都是踩过的坑）：
+    //   * 用 extraSelection 而不是覆写 paintEvent —— 覆写会把光标、选区、输入法
+    //     那一堆绘制逻辑全打乱；
+    //   * ★ 只对**视口内**的行构造选区：extraSelection 是覆盖全文档的，几千段的长文里
+    //     一次构造几千个选区会让每次滚动都卡（本项目的"大文档不能全量处理"这条约束
+    //     在这里是第 N 次生效）；
+    //   * 淡化色必须是**半透明**的：extraSelection 画在语法高亮之上，不透明的前景色
+    //     会把标题蓝、代码块里的字整片盖掉 —— 那是涂掉，不是淡化。
+    void setFocusMode(bool on);
+    bool isFocusMode() const { return m_focusMode; }
+
+    // "要淡化的行"的闭区间（行号 1 起算）= 视口可见范围 **减去** 当前段落范围。
+    // 抽成纯函数是因为它有真边界：段落正好压在视口顶部 / 段落盖住整个视口 /
+    // 段落一部分在视口外。这三条用手点很难验，用断言一秒验完。
+    struct LineRange
+    {
+        int first = 1;
+        int last = 1;
+    };
+    static QList<LineRange> dimRanges(int firstVisible, int lastVisible, int paragraphFirst, int paragraphLast);
+
+    // 当前生效的额外选区（当前行高亮 + 焦点模式的淡化）直接用基类的 extraSelections() 读 ——
+    // Qt 6 的 QPlainTextEdit 已经有这个 getter（qplaintextedit.h:143），
+    // 所以这里**不留副本**、也不再包一层同名函数：包了就成了遮蔽基类接口，
+    // 而且副本还要自己保证和基类那份同步（多一个能不一致的地方，白拿的风险）。
+
     // ============================ 帧统计（性能排查）============================
 
     // 编辑器重绘一帧的间隔统计：滚动时"卡不卡"最直接的证据。
@@ -218,6 +253,14 @@ private:
     void applyIndentWidth();                    // 把缩进宽度同步到制表位显示宽度
     QString currentLineText() const;
 
+    // 重建全部额外选区（当前行高亮 + 焦点模式的淡化），并推给基类。
+    // 光标动了（refreshCurrentLine）和滚动时（updateLineNumberArea 里 dy != 0）都会调它。
+    void updateExtraSelections();
+    // 光标所在"段落"的第一行 / 最后一行（1 起算）。段落口径 = 连续非空行，
+    // 与 TextStats::paragraphs 一致（同一件事只有一套口径）。
+    int paragraphFirstLine(int blockNumber) const;
+    int paragraphLastLine(int blockNumber) const;
+
     // 四类编辑增强。返回 true = 这个按键已经被处理掉了，不要再往下传。
     bool handleIndent(QKeyEvent *event);
     bool handleAutoPair(QKeyEvent *event);
@@ -233,6 +276,10 @@ private:
     bool m_fastMode = false;    // 高亮的"用户意图"：即使处于快速模式，这个值也记着用户的开关状态，
     // 退出快速模式时能恢复成他原来要的样子。
     bool m_highlightingWanted = true;
+
+    // ---- 焦点模式（C5）----
+    bool m_focusMode = false;
+    QColor m_dimColor;          // 淡化色（半透明灰），构造函数里定；与主题无关，亮暗都能用
 
     // 主题配色（默认亮色；切换由 ThemeManager 通过 setThemePalette() 推进来）
     ThemePalette m_themePalette;

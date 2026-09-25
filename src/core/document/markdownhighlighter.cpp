@@ -1,8 +1,15 @@
 #include "markdownhighlighter.h"   // ← 原来写成了 markdowndhighlighter.h（多了个 d），编译不过
 
+#include "markdownoutline.h"       // 围栏判据只有一份（MarkdownOutline::isFenceLine）
+
 #include <QColor>
 #include <QFont>
 #include <QTextDocument>
+
+// 本类是全局命名空间的（和 EditorWidget / TabManager 一致），而核心层的东西都在
+// markdown_editor::core::document 里，所以这里显式引一下名字（ThemePalette 也是同样处理：
+// 用的是类内的 using 别名）。
+using markdown_editor::core::document::MarkdownOutline;
 
 namespace {
 
@@ -113,15 +120,18 @@ void MarkdownHighlighter::rebuildFormats()
 void MarkdownHighlighter::highlightBlock(const QString &text)
 {
     // ---------- 1) 先处理跨行的代码块 ----------
-    // 围栏行：行首（允许缩进）是 ``` 或 ~~~
-    static const QRegularExpression fencePattern(QStringLiteral("^\\s*(```|~~~)"));
+    // 围栏行：行首（允许缩进）是 ``` 或 ~~~。
+    // ★ 这条判据不在这里写：它由 MarkdownOutline::isFenceLine() 提供，大纲面板用的是
+    //   **同一个函数**。同一条规则抄两份的结局是必然漂移 —— 哪天围栏的缩进规则变了，
+    //   改一处忘一处，于是"高亮当代码、大纲当标题"，而且没人会立刻发现。
+    //   （等价的老写法是正则 ^\s*(```|~~~)；改成手写扫描也让大纲那边省掉每行的正则开销。）
 
     int state = previousBlockState();
     if (state < 0) {
         state = kNotInCodeBlock;  // 上一行没设过状态（文档开头）
     }
 
-    if (fencePattern.match(text).hasMatch()) {
+    if (MarkdownOutline::isFenceLine(text)) {
         // 围栏行本身也按代码块样式显示，并把状态翻转（进入 / 离开代码块）
         setFormat(0, text.length(), m_codeBlockFormat);
         setCurrentBlockState(state == kInCodeBlock ? kNotInCodeBlock : kInCodeBlock);

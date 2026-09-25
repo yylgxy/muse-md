@@ -18,14 +18,18 @@
 
 #include "fulltextsearch.h"
 #include "searchpanel.h"
+#include "searchresultdelegate.h"
 
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QMetaType>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
@@ -45,6 +49,28 @@ void check(bool ok, const QString &what, const QString &detail = QString())
     if (!ok) {
         ++g_fail;
     }
+}
+
+// 等索引在后台结束（或失败/取消）。返回 false = 超时。
+//
+// ★ 为什么必须等（A1 线程化之后测试侧必须跟着变的地方）：
+//   buildIndex() 现在只表示"任务已提交"，索引跑在工作线程里。
+//   直接断言状态等于测时序运气 —— 单核 CI 机器上必挂。
+//
+// ★ 为什么用 isIndexing() 而不是断言界面文案：
+//   文案会改（"索引完成：…" 这句话改一个字测试就红），而"在不在索引"是状态，不会改。
+//   这是路线图 A1 Step 6 推荐的做法。
+bool waitForIndexFinished(SearchPanel &panel, int timeoutMs = 30000)
+{
+    QElapsedTimer clock;
+    clock.start();
+    while (panel.isIndexing()) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        if (clock.elapsed() > timeoutMs) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void writeFile(const QString &path, const QString &content)
@@ -150,17 +176,68 @@ int main(int argc, char *argv[])
         SearchHit shortHit;
         shortHit.text = QStringLiteral("  缓存服务  ");
         shortHit.matchStart = 2;
+        shortHit.matchLength = 4;  // C1：命中区间换算要用它（"缓存服务" 4 个字）
         check(SearchPanel::displayTextFor(shortHit) == QStringLiteral("缓存服务"),
               QStringLiteral("displayTextFor: 短行去掉两边空白"));
 
         SearchHit longHit;
         longHit.text = QString(400, QLatin1Char('x')) + QStringLiteral("缓存服务") + QString(400, QLatin1Char('y'));
         longHit.matchStart = 400;
+        longHit.matchLength = 4;
         const QString shown = SearchPanel::displayTextFor(longHit, 60);
         check(shown.startsWith(QStringLiteral("…")) && shown.contains(QStringLiteral("缓存服务")) && shown.endsWith(QStringLiteral("…")),
               QStringLiteral("displayTextFor: 长行围绕命中截断（命中一定看得见）"),
               QStringLiteral("%1 字符").arg(shown.size()));
         check(shown.size() <= 62, QStringLiteral("displayTextFor: 长度受控（最多 maxChars + 两个省略号）"));
+
+        // ---------------- ★ C1：命中区间换算 ----------------
+        // 这是 C1 最容易写错的地方：displayTextFor() 会 trim、会截断、会补省略号，
+        // 三种变换都会让"原文下标"失效。下面每条对应一种平移。
+        {
+            // ① trim 平移：前导 2 个空格被去掉，命中下标要从 2 变成 0
+            const SearchPanel::DisplaySpan s1 = SearchPanel::displaySpanFor(shortHit);
+            check(s1.start == 0 && s1.length == 4,
+                  QStringLiteral("displaySpanFor: trim 之后命中下标跟着平移（2 -> 0）"),
+                  QStringLiteral("start=%1 len=%2").arg(s1.start).arg(s1.length));
+
+            // ② 截断平移 + ③ 省略号占位：命中原文下标 400，截断从 380 开始，
+            //    前面补了一个 "…"，所以显示文本里的起点应该是 400-380+1 = 21
+            const SearchPanel::DisplaySpan s2 = SearchPanel::displaySpanFor(longHit, 60);
+            const QString shownLong = SearchPanel::displayTextFor(longHit, 60);
+            check(s2.start == 21 && s2.length == 4,
+                  QStringLiteral("displaySpanFor: 截断+省略号之后命中下标重新算过（400 -> 21）"),
+                  QStringLiteral("start=%1 len=%2").arg(s2.start).arg(s2.length));
+            // 最硬的一条：按算出来的区间去切显示文本，必须正好是命中词
+            check(shownLong.mid(s2.start, s2.length) == QStringLiteral("缓存服务"),
+                  QStringLiteral("displaySpanFor: 区间切出来正好是命中词（这是高亮不错位的充要条件）"),
+                  QStringLiteral("切出「%1」").arg(shownLong.mid(s2.start, s2.length)));
+
+            // 短行不截断时，区间也必须能切出命中词（这一条没有截断/省略号平移，
+            // 只有 trim 平移 —— 用来把"平移算多了"的错误挡掉）
+            check(SearchPanel::displayTextFor(shortHit).mid(s1.start, s1.length)
+                      == QStringLiteral("缓存服务"),
+                  QStringLiteral("displaySpanFor: 短行（不截断）也能切出命中词"),
+                  QStringLiteral("切出「%1」")
+                      .arg(SearchPanel::displayTextFor(shortHit).mid(s1.start, s1.length)));
+
+            // 没能定位到命中（matchStart == -1）→ 不产生区间，不崩
+            SearchHit unknown;
+            unknown.text = QStringLiteral("大小写不一致的一行");
+            unknown.matchStart = -1;
+            const SearchPanel::DisplaySpan s3 = SearchPanel::displaySpanFor(unknown);
+            check(s3.length == 0, QStringLiteral("displaySpanFor: 定位不到命中时不给区间（界面不高亮，也不崩）"));
+
+            // 命中正好在截断边界上：不能算出越界区间
+            SearchHit edge;
+            edge.text = QString(200, QLatin1Char('a')) + QStringLiteral("目标");
+            edge.matchStart = 200;
+            edge.matchLength = 2;
+            const SearchPanel::DisplaySpan s4 = SearchPanel::displaySpanFor(edge, 40);
+            const QString shownEdge = SearchPanel::displayTextFor(edge, 40);
+            check(s4.start >= 0 && s4.start + s4.length <= shownEdge.size(),
+                  QStringLiteral("displaySpanFor: 边界命中不会算出越界区间"),
+                  QStringLiteral("start=%1 len=%2 总长=%3").arg(s4.start).arg(s4.length).arg(shownEdge.size()));
+        }
     }
 
     // ============================ B. 建索引 ============================
@@ -354,14 +431,20 @@ int main(int argc, char *argv[])
         check(panel.directory() == QDir::toNativeSeparators(panelDocs),
               QStringLiteral("面板: 目录用的是 native 分隔符（显示给用户看的）"), panel.directory());
 
-        check(panel.buildIndex(), QStringLiteral("面板: 建立索引成功"));
+        // ★ A1 之后 buildIndex() 只表示"任务已提交"，索引在工作线程里跑，
+        //   所以这里必须等它结束再断言状态和索引内容。
+        check(panel.buildIndex(), QStringLiteral("面板: 索引任务被接受"));
+        check(panel.isIndexing(), QStringLiteral("面板: 提交之后立刻处于「正在索引」"));
+        check(waitForIndexFinished(panel), QStringLiteral("面板: 索引在后台完成（不超时）"));
+        check(!panel.isIndexing(), QStringLiteral("面板: 索引结束后不再是「正在索引」"));
         check(panel.statusText().contains(QStringLiteral("索引完成")),
               QStringLiteral("面板: 状态栏报告索引完成"), panel.statusText());
         check(panel.engine()->indexedFileCount() == 2, QStringLiteral("面板: 索引里是 2 个 md"));
 
         QStringList activated;
-        QObject::connect(&panel, &SearchPanel::resultActivated, [&activated](const QString &path, int line) {
-            activated << QStringLiteral("%1:%2").arg(QFileInfo(path).fileName()).arg(line);
+        // C1：信号参数从 (路径, 行号) 变成了整条 SearchHit。
+        QObject::connect(&panel, &SearchPanel::resultActivated, [&activated](const SearchHit &hit) {
+            activated << QStringLiteral("%1:%2").arg(QFileInfo(hit.filePath).fileName()).arg(hit.line);
         });
 
         const int found = panel.runSearch(QStringLiteral("缓存"));
@@ -377,6 +460,24 @@ int main(int argc, char *argv[])
               QStringLiteral("行 %1 / 位置 %2").arg(panel.hitAt(1).line).arg(panel.hitAt(1).matchStart));
         check(panel.statusText().contains(QStringLiteral("找到 3 条")),
               QStringLiteral("面板: 状态栏说了找到几条"), panel.statusText());
+
+        // ---- ★ C1：命中区间真的被写到了结果条目上（delegate 就是从那儿读的）----
+        // 这条断言把"算位置"和"存位置"连起来验了：取出来的区间必须**正好切出命中词**。
+        // 光测 displaySpanFor 只证明算术对，证明不了面板有没有把它记到条目上。
+        auto *resultTree = panel.findChild<QTreeWidget *>();
+        check(resultTree != nullptr, QStringLiteral("面板: 结果列表能找到"));
+        if (resultTree != nullptr && resultTree->topLevelItemCount() > 0
+            && resultTree->topLevelItem(0)->childCount() > 0) {
+            QTreeWidgetItem *firstRow = resultTree->topLevelItem(0)->child(0);
+            const QPoint span = firstRow->data(1, SearchResultDelegate::kMatchSpanRole).toPoint();
+            check(span.y() > 0, QStringLiteral("C1: 结果条目上存了命中区间"),
+                  QStringLiteral("start=%1 len=%2").arg(span.x()).arg(span.y()));
+            check(firstRow->text(1).mid(span.x(), span.y()) == QStringLiteral("缓存"),
+                  QStringLiteral("C1: 区间切出来的正好是命中词（delegate 靠它上色）"),
+                  QStringLiteral("切出「%1」").arg(firstRow->text(1).mid(span.x(), span.y())));
+        } else {
+            check(false, QStringLiteral("C1: 结果列表里应该有分组和命中行"));
+        }
 
         // "点开第 N 条" → 发 resultActivated，主窗口据此打开文件并跳行
         check(panel.activateResult(1), QStringLiteral("面板: 点第 2 条 -> 成功"));

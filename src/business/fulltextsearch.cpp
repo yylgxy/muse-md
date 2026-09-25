@@ -5,6 +5,7 @@
 #include "logger.h"
 
 #include <QCoreApplication>
+#include <QAtomicInt>
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
@@ -25,10 +26,17 @@ using markdown_editor::core::storage::FileManager;
 // 每个实例一条具名连接：QSqlDatabase 的连接名在进程内必须唯一，重名会被 Qt 忽略并告警。
 // 用自增编号而不是"按库路径命名"：同一个库文件在同一进程里也可能被两个实例先后打开
 // （测试就是这么干的），编号能保证名字不撞。
+// ★ 为什么必须是 QAtomicInt 而不是 `static int`（A1 线程化踩出来的）：
+//   A1 之前全进程只有一个线程在建实例，`++counter` 是不是原子无所谓。
+//   A1 之后 GUI 线程（读侧）和工作线程（写侧）会**同时**创建实例，
+//   非原子的 `++counter` 构成数据竞争 —— 两个实例可能拿到同一个编号。
+//   而 Qt 的规则是"连接名重复会被忽略并告警"，后果是第二个实例拿到一个
+//   **不是自己创建的连接**，行为不可预测（比崩溃更难查）。
+//   这是"原来靠「只有一个线程」隐式成立的不变式，进线程后就不成立了"的典型例子。
 QString nextConnectionName()
 {
-    static int counter = 0;
-    return QStringLiteral("markdown_editor_fts_%1").arg(++counter);
+    static QAtomicInt counter(0);
+    return QStringLiteral("markdown_editor_fts_%1").arg(counter.fetchAndAddRelaxed(1) + 1);
 }
 
 }  // namespace
@@ -151,6 +159,21 @@ bool FullTextSearch::ensureSchema(QString *error)
 
     QSqlQuery query(m_db);
 
+    // ---- 连接级 / 库级参数（A1 线程化）----
+    // 为什么必须开 WAL：线程化之后，"工作线程正在写索引"和"GUI 线程正在搜索"
+    // 会同时发生。默认的 rollback journal 模式下，写事务持锁期间读会直接拿到
+    // "database is locked" 错误。
+    //   * journal_mode 是**库级持久属性**（写一次就记在库文件里，之后别的连接也生效）
+    //   * busy_timeout 是**连接级**属性（每个连接都要自己设一遍）
+    QSqlQuery pragma(m_db);
+    if (!pragma.exec(QStringLiteral("PRAGMA journal_mode = WAL"))) {
+        // 不致命：退回默认模式，只是"边索引边搜索"可能偶发 locked，重试即可
+        LOG_WARN("开 WAL 失败（索引期间搜索可能偶发 database is locked）：%1",
+                 pragma.lastError().text());
+    }
+    pragma.exec(QStringLiteral("PRAGMA busy_timeout = 5000"));   // 撞锁时等 5 秒再报错，别立刻失败
+    pragma.exec(QStringLiteral("PRAGMA synchronous = NORMAL"));  // WAL 下的常规取值：掉电最多丢最后一次提交
+
     // 元数据表：索引里有哪些文件、它们当时的磁盘状态（用来判断"这个文件变过没有"）
     if (!query.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS indexed_files ("
                                    "path TEXT PRIMARY KEY, "
@@ -192,6 +215,13 @@ bool FullTextSearch::ensureSchema(QString *error)
 
 // ============================ 建立索引 ============================
 
+void FullTextSearch::requestCancel()
+{
+    // 只置一个原子标志：可以从任何线程调，不加锁、不阻塞。
+    // 真正"什么时候停"由 indexDirectory() 的取消点决定（只在文件之间，见那里的注释）。
+    m_cancelRequested.store(true);
+}
+
 IndexStats FullTextSearch::indexDirectory(const QString &dir, QString *error)
 {
     IndexStats stats;
@@ -201,6 +231,10 @@ IndexStats FullTextSearch::indexDirectory(const QString &dir, QString *error)
 
     QElapsedTimer timer;
     timer.start();
+
+    // 复位取消标志：requestCancel() 只对"当前这一次"有效（见头文件说明）。
+    // 放在这里而不是构造函数里，是因为同一个实例会被反复调用（测试就是这么用的）。
+    m_cancelRequested.store(false);
 
     const auto fail = [this, error](const QString &why) {
         if (error != nullptr) {
@@ -263,7 +297,40 @@ IndexStats FullTextSearch::indexDirectory(const QString &dir, QString *error)
     insertMeta.prepare(QStringLiteral("INSERT INTO indexed_files(path, mtime, size, lines) VALUES (?, ?, ?, ?)"));
 
     int done = 0;
+
+    // ---- 进度节流（A1）----
+    // 跨线程发进度信号 = 往对方事件队列塞事件。5000 个文件塞 5000 个事件，
+    // 会让 GUI 线程忙于处理进度，反而拖慢索引。这里限制到 ~10 次/秒，
+    // 但**最后一次一定发**（否则进度条会停在 99%）。
+    // 节流只影响"报了多少次"，不影响 stats 里的任何统计值。
+    QElapsedTimer progressClock;
+    progressClock.start();
+    const auto emitProgress = [&](int current) {
+        const bool isLast = (current >= stats.filesFound);
+        if (isLast || progressClock.elapsed() >= 100) {
+            emit indexProgress(current, stats.filesFound);
+            progressClock.restart();
+        }
+    };
+
     for (const QString &path : found) {
+        // ★ 取消点：只在"文件之间"检查，不在"文件内部"检查。
+        //   理由：每个文件是一个原子工作单元（先删旧行、再插新行、最后写元数据），
+        //   在中间停下会留下半个文件的索引；文件之间停下则是干净的回滚点。
+        //
+        // ★ 取消时**不发 indexFinished**：那个信号的语义是"一次索引结束（参数就是
+        //   indexDirectory 的返回值）"，发出去界面会显示"索引完成"。取消由
+        //   SearchIndexWorker 发一个独立的 cancelled() 信号。
+        if (m_cancelRequested.load()) {
+            stats.cancelled = true;
+            if (inTransaction) {
+                m_db.rollback();  // ★ 关键：回滚，让索引保持上一次的完整状态
+            }
+            stats.elapsedMs = timer.elapsed();
+            LOG_WARN("索引被取消：处理到 %1/%2 个文件，本次改动已回滚", done, stats.filesFound);
+            return stats;
+        }
+
         const QFileInfo info(path);
         const qint64 mtime = info.lastModified().toMSecsSinceEpoch();
         const qint64 size = info.size();
@@ -274,14 +341,14 @@ IndexStats FullTextSearch::indexDirectory(const QString &dir, QString *error)
             LOG_WARN("索引时跳过 %1（%2）", path, reason);
             ++stats.filesSkipped;
             known.remove(path);
-            emit indexProgress(++done, stats.filesFound);
+            emitProgress(++done);
         };
 
         const auto knownIt = known.find(path);
         if (knownIt != known.end() && knownIt->mtime == mtime && knownIt->size == size) {
             ++stats.filesSkipped;
             known.erase(knownIt);  // 它还在，别当成"已经被删掉"
-            emit indexProgress(++done, stats.filesFound);
+            emitProgress(++done);
             continue;
         }
 
@@ -345,7 +412,7 @@ IndexStats FullTextSearch::indexDirectory(const QString &dir, QString *error)
         stats.linesIndexed += indexedLines;
         ++stats.filesIndexed;
         known.remove(path);
-        emit indexProgress(++done, stats.filesFound);
+        emitProgress(++done);
     }
 
     // ---- 4. 清掉"索引里有、这次没扫到"的文件 ----

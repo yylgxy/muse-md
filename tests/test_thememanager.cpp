@@ -27,6 +27,8 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
@@ -34,6 +36,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QTemporaryDir>
 
 #include <cstdio>
 
@@ -474,6 +477,117 @@ int main(int argc, char *argv[])
         const int varUses = html.count(QStringLiteral("var(--"));
         check(varUses >= 20, QStringLiteral("模板: 变量被大量使用（说明颜色确实都收进来了）"),
               QStringLiteral("%1 处").arg(varUses));
+    }
+
+    // ============================ F. JSON 导入导出（C7）============================
+    {
+        std::printf("---- F. JSON 导入导出 ----\n");
+
+        // ---- 往返：toJson -> fromJson 一个字段都不丢 ----
+        const ThemePalette dark = ThemePalette::dark();
+        const QJsonObject obj = dark.toJson();
+        ThemePalette restored;
+        QString err;
+        check(ThemePalette::fromJson(obj, &restored, &err), QStringLiteral("往返: 暗色 -> JSON -> 暗色，能解析回来"),
+              err);
+        // 逐个字段比对（不能只比一两个 —— 丢字段是"某个语法元素变黑"那种难查的 bug）
+        check(restored.editorBackground == dark.editorBackground
+                  && restored.editorForeground == dark.editorForeground
+                  && restored.selectionBackground == dark.selectionBackground
+                  && restored.gutterBackground == dark.gutterBackground
+                  && restored.heading == dark.heading && restored.bold == dark.bold
+                  && restored.italic == dark.italic && restored.link == dark.link
+                  && restored.blockQuote == dark.blockQuote && restored.listMarker == dark.listMarker
+                  && restored.inlineCodeForeground == dark.inlineCodeForeground
+                  && restored.inlineCodeBackground == dark.inlineCodeBackground
+                  && restored.codeBlockForeground == dark.codeBlockForeground
+                  && restored.codeBlockBackground == dark.codeBlockBackground
+                  && restored.currentLineNumberText == dark.currentLineNumberText
+                  && restored.currentLineHighlight == dark.currentLineHighlight
+                  && restored.gutterText == dark.gutterText
+                  && restored.selectionForeground == dark.selectionForeground,
+              QStringLiteral("往返: 18 个字段全部原样回来（不丢一个）"));
+
+        // 键名是稳定契约（导出文件要能被旧版本/其它工具读）
+        check(obj.contains(QStringLiteral("editorBackground")) && obj.contains(QStringLiteral("heading"))
+                  && obj.contains(QStringLiteral("codeBlockBackground")),
+              QStringLiteral("JSON: 键名是稳定的字段名（editorBackground / heading / …）"));
+        check(obj.value(QStringLiteral("heading")).isString(),
+              QStringLiteral("JSON: 颜色是 \"#RRGGBB\" 字符串（人眼可读，方便手改）"),
+              obj.value(QStringLiteral("heading")).toString());
+
+        // ---- 缺字段：必须失败，且不污染 out ----
+        {
+            QJsonObject incomplete = dark.toJson();
+            incomplete.remove(QStringLiteral("link"));
+            ThemePalette untouched;
+            bool ok = ThemePalette::fromJson(incomplete, &untouched, &err);
+            check(!ok, QStringLiteral("缺字段: 少一个 link 就拒绝（不是静默用默认色）"));
+            check(err.contains(QStringLiteral("link")), QStringLiteral("缺字段: 错误信息点出是哪个键"), err);
+        }
+
+        // ---- 非法颜色：必须失败 ----
+        {
+            QJsonObject badColor = dark.toJson();
+            badColor.insert(QStringLiteral("heading"), QStringLiteral("not-a-color"));
+            ThemePalette t;
+            check(!ThemePalette::fromJson(badColor, &t, &err), QStringLiteral("非法颜色: 拒绝导入"));
+            check(err.contains(QStringLiteral("heading")), QStringLiteral("非法颜色: 点出是 heading"), err);
+        }
+
+        // ---- 值类型不对：必须失败 ----
+        {
+            QJsonObject badType = dark.toJson();
+            badType.insert(QStringLiteral("bold"), 42);
+            ThemePalette t;
+            check(!ThemePalette::fromJson(badType, &t, &err), QStringLiteral("类型不对: 数字当颜色也拒绝"));
+        }
+
+        // ---- exportTheme：真的落盘一份 JSON，且 importTheme 能读回来 ----
+        QTemporaryDir temp;
+        check(temp.isValid(), QStringLiteral("临时目录就绪"));
+        const QString exportPath = temp.path() + QStringLiteral("/my-theme.json");
+        QString exportErr;
+        const bool exported = ThemeManager::instance().exportTheme(exportPath, &exportErr);
+        check(exported, QStringLiteral("导出: 写得出文件"), exportErr);
+        check(QFile::exists(exportPath), QStringLiteral("导出: 文件真的在磁盘上"));
+
+        // ---- importTheme：落盘到 themes 目录 + 能列出 + 能读回 ----
+        QString importErr;
+        const bool imported = ThemeManager::instance().importTheme(exportPath, QStringLiteral("我的主题"), &importErr);
+        check(imported, QStringLiteral("导入: 成功"), importErr);
+        check(!ThemeManager::instance().importedThemePath().isEmpty(),
+              QStringLiteral("导入: importedThemePath() 有值"));
+        check(QFile::exists(ThemeManager::instance().importedThemePath()),
+              QStringLiteral("导入: 主题文件落在 themes 目录里"));
+
+        const auto customs = ThemeManager::instance().customThemes();
+        check(customs.size() >= 1, QStringLiteral("列出: 能列出已导入的主题"), QStringLiteral("%1 个").arg(customs.size()));
+
+        // ---- paletteFromFile：读回的文件内容 == 导出时的配色 ----
+        QString readErr;
+        const ThemePalette readBack = ThemeManager::paletteFromFile(ThemeManager::instance().importedThemePath(), &readErr);
+        check(readErr.isEmpty(), QStringLiteral("读回: 无错误"), readErr);
+        check(readBack.editorBackground == ThemeManager::instance().currentPalette().editorBackground,
+              QStringLiteral("读回: 配色一致"));
+
+        // ---- WCAG 校验：导入一个"看不清"的主题必须被拒 ----
+        {
+            // 造一份正文和底色几乎一样（对比度 ≈ 1）的坏主题
+            ThemePalette bad = ThemePalette::light();
+            bad.editorBackground = QColor(0x30, 0x30, 0x30);
+            bad.editorForeground = QColor(0x30, 0x30, 0x30);
+            const QString badPath = temp.path() + QStringLiteral("/bad-theme.json");
+            QFile badFile(badPath);
+            if (badFile.open(QIODevice::WriteOnly)) {
+                badFile.write(QJsonDocument(bad.toJson()).toJson());
+                badFile.close();
+            }
+            QString badErr;
+            const bool badImported = ThemeManager::instance().importTheme(badPath, QStringLiteral("坏主题"), &badErr);
+            check(!badImported, QStringLiteral("WCAG: 对比度不达标的主题拒绝导入"));
+            check(badErr.contains(QStringLiteral("对比度")), QStringLiteral("WCAG: 错误说清是对比度问题"), badErr);
+        }
     }
 
     QDir(base).removeRecursively();

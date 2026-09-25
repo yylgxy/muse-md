@@ -15,6 +15,10 @@
 
 namespace markdown_editor::core::storage {
 
+// 自研行级 diff 在 core::document 里（本文件在 core::storage，无限定名找不到它）。
+// 全项目对"core::document 的类型"都用这个写法 —— 见 mainwindow.cpp 顶部那一片 using。
+using markdown_editor::core::document::LineDiff;
+
 namespace {
 
 // git 里"空树"对象的固定哈希（官方常量）。
@@ -396,6 +400,53 @@ QString VersionControl::diffWithParent(const QString &repoDir, const QString &re
     const QStringList fields = parents.trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
     const QString base = (fields.size() >= 2) ? fields.at(1) : QString::fromLatin1(kEmptyTreeHash);
     return diff(repoDir, base, rev, error);
+}
+
+LineDiff::Result VersionControl::diffWithParentLocal(const QString &repoDir,
+                                                     const QString &rev,
+                                                     QString *error) const
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    if (rev.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("没有指定版本");
+        }
+        return LineDiff::Result();
+    }
+
+    // 父提交的判断和 diffWithParent() 用同一套：`rev^` 在第一个提交上会直接失败，
+    // 所以先问 `git rev-list --parents`，拿不到父提交就把旧文本当空。
+    QString parents;
+    if (!runGit(repoDir,
+                QStringList{QStringLiteral("rev-list"), QStringLiteral("--parents"),
+                            QStringLiteral("-n"), QStringLiteral("1"), rev},
+                &parents,
+                error)) {
+        return LineDiff::Result();
+    }
+
+    const QStringList fields = parents.trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QString parentRev = (fields.size() >= 2) ? fields.at(1) : QString();
+
+    // ★ 只有"取内容"这一步依赖 git；"算差异"完全在本地（这就是本函数存在的意义）。
+    QString oldText;
+    if (!parentRev.isEmpty()) {
+        oldText = contentOf(repoDir, parentRev, error);
+        if (error != nullptr && !error->isEmpty()) {
+            return LineDiff::Result();
+        }
+    }
+
+    const QString newText = contentOf(repoDir, rev, error);
+    if (error != nullptr && !error->isEmpty()) {
+        return LineDiff::Result();
+    }
+
+    // 两份快照统一是 UTF-8（见本文件顶部"每次都存成 UTF-8"），
+    // 所以这里按行切之后直接比较，不需要再管编码。
+    return LineDiff::compute(LineDiff::splitLines(oldText), LineDiff::splitLines(newText));
 }
 
 QString VersionControl::contentOf(const QString &repoDir, const QString &rev, QString *error) const

@@ -4,10 +4,12 @@
 // 正因为如此它才能被自动测 —— 主窗口本身没法在测试里实例化（里面有 QWebEngineView，
 // 构造就要拉起 Chromium），"窗口记忆"这种东西如果写在主窗口里，就只能靠人肉重启验证。
 //
-// 测三件事：
+// 测四件事：
 //   1. 存进去再读出来，一模一样（几何、文件列表、索引、面板可见性）；
 //   2. 配置里什么都没有时是安全默认值（首次启动不能崩、也不能瞎恢复）；
-//   3. usableFiles() 的规则：去空、去重（大小写不敏感）、保序。
+//   3. usableFiles() 的规则：去空、去重（大小写不敏感）、保序；
+//   4. C2 的光标/滚动位置编解码：格式、排序稳定、坏数据容错
+//      —— 坏配置必须只被丢掉，不能让窗口起不来。
 //
 // 配置指向临时文件，绝不碰用户真实的 config.ini。
 //
@@ -61,6 +63,8 @@ int main(int argc, char *argv[])
         check(state.currentIndex == 0, QStringLiteral("首次: 当前索引是 0"));
         check(state.fileTreeVisible, QStringLiteral("首次: 文件树默认可见"));
         check(!state.searchPanelVisible, QStringLiteral("首次: 搜索面板默认隐藏"));
+        check(state.viewState.isEmpty(), QStringLiteral("首次: 没有记过任何光标位置（C2）"));
+        check(!state.outlinePanelVisible, QStringLiteral("首次: 大纲面板默认隐藏（C4）"));
     }
 
     // ============================ B. 存了再读（往返）============================
@@ -73,6 +77,10 @@ int main(int argc, char *argv[])
         saved.currentIndex = 1;
         saved.fileTreeVisible = false;
         saved.searchPanelVisible = true;
+        saved.outlinePanelVisible = true;  // C4
+        // C2：两个文件的"上次看到哪"
+        SessionState::setViewState(&saved.viewState, base + QStringLiteral("/a.md"), 42, 7, 900);
+        SessionState::setViewState(&saved.viewState, base + QStringLiteral("/b.md"), 1, 1, 0);
         SessionState::save(saved);
 
         // 换一次配置路径 = 丢掉内存里的 QSettings、下次读是真的从文件读
@@ -86,6 +94,25 @@ int main(int argc, char *argv[])
         check(loaded.currentIndex == 1, QStringLiteral("往返: 当前索引不变"));
         check(!loaded.fileTreeVisible, QStringLiteral("往返: 文件树可见性不变（这次是隐藏）"));
         check(loaded.searchPanelVisible, QStringLiteral("往返: 搜索面板可见性不变（这次是显示）"));
+        check(loaded.outlinePanelVisible, QStringLiteral("往返: 大纲面板可见性不变（C4）"));
+
+        // ---- C2：光标/滚动位置往返 ----
+        check(loaded.viewState.size() == 2, QStringLiteral("往返(C2): 记了 2 个文件的位置"),
+              QStringLiteral("%1 条").arg(loaded.viewState.size()));
+        int line = 0;
+        int column = 0;
+        int scroll = 0;
+        const bool parsed = SessionState::parseViewState(
+            loaded.viewState.value(base + QStringLiteral("/a.md")), &line, &column, &scroll);
+        check(parsed && line == 42 && column == 7 && scroll == 900,
+              QStringLiteral("往返(C2): a.md 的行/列/滚动值一字不差"),
+              QStringLiteral("行 %1 列 %2 滚动 %3").arg(line).arg(column).arg(scroll));
+
+        // ★ 键名大小写不该影响：Windows 上同一路径的大小写变体是同一个文件
+        //   （这里只断言"key 是原样存的"，大小写归一由调用方保证 —— 主窗口用
+        //    FileManager::filePath()，那是绝对的规范化路径）
+        check(loaded.viewState.contains(base + QStringLiteral("/b.md")),
+              QStringLiteral("往返(C2): b.md 那条也在"));
 
         // 真的落到文件里了（不是"内存里对"）
         check(QFile::exists(configPath), QStringLiteral("往返: 配置文件真的写出来了"));
@@ -156,6 +183,104 @@ int main(int argc, char *argv[])
               QStringLiteral("键名: 文件树可见性"));
         check(SessionState::searchPanelVisibleKey() == QStringLiteral("session/searchPanelVisible"),
               QStringLiteral("键名: 搜索面板可见性"));
+        check(SessionState::viewStateKey() == QStringLiteral("session/viewState"),
+              QStringLiteral("键名: 光标位置（C2）"));
+        // 键名会被写进用户目录下的配置文件：改一次键名 = 所有人的上次会话丢失。
+        // 所以键名也当契约钉住（新增字段只能加新键，不能改老键）。
+        check(SessionState::outlinePanelVisibleKey() == QStringLiteral("session/outlinePanelVisible"),
+              QStringLiteral("键名: 大纲面板可见性（C4）"));
+    }
+
+    // ============================ F. C2：光标位置的编解码 ============================
+    //
+    // 这一段全是纯函数，是 C2 里真正容易出错的部分（格式、坏数据、排序稳定性）。
+    {
+        std::printf("---- F. 光标位置编解码（C2）----\n");
+
+        // ---- 单个值的格式 ----
+        check(SessionState::makeViewState(42, 7, 900) == QStringLiteral("42|7|900"),
+              QStringLiteral("C2: makeViewState 的格式是「行|列|滚动」"),
+              SessionState::makeViewState(42, 7, 900));
+        // 负数夹成 0：光标和滚动条都不该出现负值，但存进去之前必须先夹住，
+        // 否则读回来会让窗口去设一个非法的光标位置
+        check(SessionState::makeViewState(-5, -1, -100) == QStringLiteral("0|0|0"),
+              QStringLiteral("C2: 负数一律夹成 0"));
+
+        int line = -1;
+        int column = -1;
+        int scroll = -1;
+        check(SessionState::parseViewState(QStringLiteral("42|7|900"), &line, &column, &scroll)
+                  && line == 42 && column == 7 && scroll == 900,
+              QStringLiteral("C2: parseViewState 能读回三个数"));
+        check(SessionState::parseViewState(QStringLiteral("42|7"), &line, &column, &scroll) == false,
+              QStringLiteral("C2: 字段数不对 -> false（当作没记过）"));
+        check(SessionState::parseViewState(QStringLiteral("a|b|c"), &line, &column, &scroll) == false,
+              QStringLiteral("C2: 不是数字 -> false"));
+        check(SessionState::parseViewState(QString(), &line, &column, &scroll) == false,
+              QStringLiteral("C2: 空串 -> false"));
+        check(SessionState::parseViewState(QStringLiteral("-9|-9|-9"), &line, &column, &scroll)
+                  && line == 0 && column == 0 && scroll == 0,
+              QStringLiteral("C2: 手改配置写成了负数 -> 夹到 0，不崩"));
+
+        // ---- 整表的编解码 ----
+        QHash<QString, QString> table;
+        SessionState::setViewState(&table, base + QStringLiteral("/z.md"), 3, 1, 10);
+        SessionState::setViewState(&table, base + QStringLiteral("/a.md"), 9, 2, 20);
+        SessionState::setViewState(&table, QString(), 1, 1, 0);          // 空路径 -> 不记
+        SessionState::setViewState(&table, QStringLiteral("   "), 1, 1, 0);  // 全空白 -> 不记
+        check(table.size() == 2, QStringLiteral("C2: 空路径/空白路径不进表"),
+              QStringLiteral("%1 条").arg(table.size()));
+
+        const QStringList encoded = SessionState::encodeViewState(table);
+        check(encoded.size() == 2, QStringLiteral("C2: 编码出 2 行"));
+        // ★ 排序稳定：不排的话 QHash 每次遍历顺序都不一样，配置文件会一直"看起来变了"
+        check(encoded.size() == 2
+                  && encoded.at(0).startsWith(base + QStringLiteral("/a.md") + QLatin1Char('\t'))
+                  && encoded.at(1).startsWith(base + QStringLiteral("/z.md") + QLatin1Char('\t')),
+              QStringLiteral("C2: 编码结果按路径排序（配置文件的 diff 才稳定）"),
+              encoded.join(QStringLiteral(" ; ")));
+
+        const QStringList twice = SessionState::encodeViewState(table);
+        check(twice == encoded, QStringLiteral("C2: 同一份表编码两次结果完全相同"));
+
+        const QHash<QString, QString> decoded = SessionState::decodeViewState(encoded);
+        check(decoded == table, QStringLiteral("C2: 编码再解码 = 原表（往返）"));
+
+        // ---- 坏数据容错 ----
+        const QStringList dirty{
+            QStringLiteral("没有分隔符的一行"),                                  // 坏行
+            QStringLiteral("\t只有值没有路径"),                                   // 路径为空
+            base + QStringLiteral("/good.md") + QLatin1Char('\t') + QStringLiteral("5|6|7"),
+            base + QStringLiteral("/bad.md") + QLatin1Char('\t') + QStringLiteral("这不是数字"),
+        };
+        const QHash<QString, QString> recovered = SessionState::decodeViewState(dirty);
+        check(recovered.size() == 1, QStringLiteral("C2: 坏行被丢掉，好的那条留下"),
+              QStringLiteral("%1 条").arg(recovered.size()));
+        check(recovered.contains(base + QStringLiteral("/good.md")),
+              QStringLiteral("C2: 坏数据不影响别的条目"));
+    }
+
+    // ============================ G. C2：坏配置不该让窗口崩 ============================
+    {
+        std::printf("---- G. 坏配置的容错（C2）----\n");
+
+        SessionState::Data broken;
+        broken.openFiles = QStringList{base + QStringLiteral("/c.md")};
+        SessionState::save(broken);
+        ConfigManager::setFilePath(configPath);
+        // 直接往配置里写一段坏的光标记录
+        ConfigManager::setStringList(SessionState::viewStateKey(),
+                                     QStringList{QStringLiteral("乱写的一行"),
+                                                 base + QStringLiteral("/c.md") + QLatin1Char('\t')
+                                                     + QStringLiteral("x|y|z")});
+        ConfigManager::sync();
+
+        const SessionState::Data loaded = SessionState::load();
+        check(loaded.viewState.isEmpty(),
+              QStringLiteral("C2: 配置文件被写坏 -> 读回来是空表（不抛、不崩、不影响别的键）"),
+              QStringLiteral("%1 条").arg(loaded.viewState.size()));
+        check(loaded.openFiles.size() == 1,
+              QStringLiteral("C2: 坏的光标记录不影响文件列表"));
     }
 
     QDir(base).removeRecursively();

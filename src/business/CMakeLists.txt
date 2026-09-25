@@ -13,8 +13,14 @@ add_library(business STATIC
     recentfiles.cpp
     fulltextsearch.h
     fulltextsearch.cpp
+    searchindexworker.h
+    searchindexworker.cpp
     searchpanel.h
     searchpanel.cpp
+    searchresultdelegate.h
+    searchresultdelegate.cpp
+    outlinepanel.h
+    outlinepanel.cpp
     exporter.h
     exporter.cpp
     thememanager.h

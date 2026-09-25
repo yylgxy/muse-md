@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QPalette>
 #include <QString>
+#include <QStringList>
 
 #include "themepalette.h"  // 编辑器配色的类型出现在接口里（editorPalette()）
 
@@ -67,8 +68,52 @@ public:
     // 主题 → 编辑器配色（语法高亮 + 行号栏用）
     static markdown_editor::core::document::ThemePalette editorPalette(Theme theme);
 
+    // 当前应该给编辑器的配色：有自定义主题时返回它，否则返回当前主题的内置配色。
+    // 这是"自定义主题真正生效"的那一下 —— 编辑器/行号栏只认这个函数，不关心来源。
+    markdown_editor::core::document::ThemePalette currentPalette() const;
+
     // 配置里存主题用的键名
     static QString storageKey();
+
+    // ---- 主题导入导出（C7）----
+
+    // 导出一份主题 JSON。path 是目标文件路径（不含目录会自动建）。
+    // 成功返回 true；失败 false + error（目录建不了、写不进等）。
+    bool exportTheme(const QString &path, QString *error = nullptr) const;
+
+    // 导入一份主题 JSON：读文件 → 严格解析（ThemePalette::fromJson）→
+    // WCAG 对比度校验（正文/语法色对底色 >= 4.5）→ 存进 <AppData>/themes/<name>.json。
+    // name 是导入后显示的名字（传空则用文件名去后缀）。
+    // 校验不达标返回 false + error（说清是"哪个颜色对底色对比度不够"），不落盘、不改状态。
+    // 成功返回 true，并可通过 importedThemePath() 拿到落盘路径。
+    bool importTheme(const QString &path, const QString &name = QString(), QString *error = nullptr);
+
+    // 导入成功后落盘的路径（失败时为空）。
+    QString importedThemePath() const;
+
+    // 已经导入的自定义主题：返回它们的"名字 + 落盘路径"（名字 = 文件名去后缀）。
+    // 用 QPair（first = 名字，second = 完整路径）而不是自定义结构体 ——
+    // 就两个字段，为它单独建个 struct 反而啰嗦。
+    QList<QPair<QString, QString>> customThemes() const;
+
+    // 读取某个自定义主题的配色（importTheme / customThemes 的配套）。
+    // path 不存在或解析失败返回空 ThemePalette + error。
+    static markdown_editor::core::document::ThemePalette
+    paletteFromFile(const QString &path, QString *error = nullptr);
+
+    // 应用一个自定义主题：把它的配色交给编辑器/预览（**不改 QSS**，QSS 仍是亮/暗两套里选）。
+    // 这是 C7 的取舍：自定义主题只换编辑器配色（用户最想要的那部分），
+    // 控件外观（菜单/按钮）仍跟随"亮色/暗色"二选一 —— 因为给每个自定义主题都配一套
+    // 完整 QSS 会让"导入主题"变成"导入一整个皮肤包"，复杂度翻倍而收益很小。
+    // baseTheme 决定控件外观用哪套 QSS。
+    void applyCustomTheme(const markdown_editor::core::document::ThemePalette &palette,
+                          Theme baseTheme = Theme::Dark);
+
+    // 清除自定义主题，回到纯亮/暗。调用后 editorPalette() 恢复成内置两套。
+    void clearCustomTheme();
+
+    // 是否正在使用某个自定义主题（区别于内置亮/暗）。
+    bool hasCustomTheme() const;
 
 signals:
     // 主题变了。编辑器、预览区都连这个信号做各自那部分（它们不需要认识彼此）。
@@ -87,9 +132,15 @@ private:
     // 把样式表和调色板真正应用到 QApplication
     void applyToApplication(Theme theme);
 
+    // 自定义主题的存储目录：<AppData>/Dev/MarkdownEditor/themes/
+    QString themesDirectory() const;
+
     Theme m_theme = Theme::Light;
     bool m_applied = false;         // 是否已经应用过（决定"同主题是否要真的应用一遍"）
     QPalette m_lightPalette;        // 系统原生调色板：切回亮色时要还原成它
+    QString m_importedThemePath;    // 最近一次 importTheme 成功后的落盘路径
+    bool m_hasCustomTheme = false;  // 是否在用一个自定义主题
+    markdown_editor::core::document::ThemePalette m_customPalette;  // 自定义主题的配色（hasCustomTheme 时有效）
 };
 
 #endif // THEMEMANAGER_H

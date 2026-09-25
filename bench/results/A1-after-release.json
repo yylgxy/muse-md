@@ -1,0 +1,177 @@
+{
+    "buildType": "Release",
+    "generatedAt": "2026-09-25T17:24:27",
+    "qt": "6.5.3",
+    "quickMode": true,
+    "samples": [
+        {
+            "median": 2.0218,
+            "name": "B3 造 10000 行文档",
+            "note": "实际 196890 字符",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 2.0218
+        },
+        {
+            "median": 11.0176,
+            "name": "B3 SyncBridge::buildLineMap(10000 行)",
+            "note": "映射出 2667 个顶层块",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 11.0176
+        },
+        {
+            "median": 1.7576,
+            "name": "B4 detectEncoding(UTF-8, 750 KB)",
+            "note": "判定为 UTF-8",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 1.7576
+        },
+        {
+            "median": 2.9486,
+            "name": "B4 decode(UTF-8)",
+            "note": "UTF-8, 750 KB",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 2.9486
+        },
+        {
+            "median": 1e-04,
+            "name": "B4 detectEncoding(UTF-8-BOM, 750 KB)",
+            "note": "判定为 UTF-8 (带 BOM)",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 1e-04
+        },
+        {
+            "median": 1.1945,
+            "name": "B4 decode(UTF-8-BOM)",
+            "note": "UTF-8-BOM, 750 KB",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 1.1945
+        },
+        {
+            "median": 1.1017,
+            "name": "B4 detectEncoding(GBK(系统编码), 546 KB)",
+            "note": "判定为 本地编码 (GBK/CP936)",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 1.1017
+        },
+        {
+            "median": 2.4703,
+            "name": "B4 decode(GBK(系统编码))",
+            "note": "GBK(系统编码), 546 KB",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 2.4703
+        },
+        {
+            "median": 1e-04,
+            "name": "B4 detectEncoding(UTF-16LE(带BOM), 682 KB)",
+            "note": "判定为 UTF-16 LE",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 1e-04
+        },
+        {
+            "median": 0.4015,
+            "name": "B4 decode(UTF-16LE(带BOM))",
+            "note": "UTF-16LE(带BOM), 682 KB",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 0.4015
+        },
+        {
+            "median": 10.0689,
+            "name": "B5 造 1MB 文档",
+            "note": "1048742 字符",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 10.0689
+        },
+        {
+            "median": 159.701,
+            "name": "B5 standaloneHtml(1MB文档)",
+            "note": "",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 159.701
+        },
+        {
+            "median": 170.952,
+            "name": "B5 exportHtml 落盘(1MB文档)",
+            "note": "",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 170.952
+        },
+        {
+            "median": 2.3602,
+            "name": "B1 造 300000 字符文档",
+            "note": "实际 300158 字符",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 2.3602
+        },
+        {
+            "median": 20.2639,
+            "name": "B1 setPlainText(300000 字符)",
+            "note": "编辑器读到 300158 字符，快速模式=开",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 20.2639
+        },
+        {
+            "median": 0,
+            "name": "B1 阈值判定 prefersFastMode()",
+            "note": "阈值 300000：299999→常规，300000→常规",
+            "runs": 20,
+            "unit": "ms",
+            "worst": 1e-04
+        },
+        {
+            "median": 3.5107,
+            "name": "B1 大文档连续插入 50 字符（合计）",
+            "note": "Release 构建；单次约 0.0702 ms",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 3.5107
+        },
+        {
+            "median": 15816.546,
+            "name": "B2 首次索引 800 文件×200 行",
+            "note": "复用已有样本：C:\\<TEMP>\\muse-md-bench-index-800x200",
+            "runs": 1,
+            "unit": "ms",
+            "worst": 15816.546
+        },
+        {
+            "median": 47.2464,
+            "name": "B2 二次索引（全跳过）",
+            "note": "",
+            "runs": 2,
+            "unit": "ms",
+            "worst": 47.2464
+        },
+        {
+            "median": 4,
+            "name": "B2 界面级：buildIndex() 占住主线程的时长",
+            "note": "这一句返回之前，主线程不会处理任何用户输入（旧实现里 processEvents 用的是 ExcludeUserInputEvents）",
+            "runs": 1,
+            "unit": "ms",
+            "worst": 4
+        },
+        {
+            "median": 4.2725,
+            "name": "B2 界面级：建立索引期间事件投递最坏延迟",
+            "note": "投出 193 次心跳；旧实现会低估这一项（见代码注释）",
+            "runs": 193,
+            "unit": "ms",
+            "worst": 4.2725
+        }
+    ],
+    "scenario": "all"
+}

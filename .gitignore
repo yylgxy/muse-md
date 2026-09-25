@@ -8,6 +8,26 @@ cmake-build-*/
 # 里面的东西（阅读路线、面试问答、逐文件讲解）是个人学习资料，
 # 放在仓库里会被当成项目文档，所以固定放在 .study/ 并在这里排除。
 .study/
+
+# ---- 个人向文档（面向自己 / 面试准备，不进仓库）----
+# 这三份是「对我自己说的」材料，不是项目文档：
+#   * PROJECT_STUDY_GUIDE.md —— 项目吃透手册，正文逐段对照我自己的简历与面试口径
+#   * FEATURE_MATRIX.md      —— 简历需求清单 ↔ 代码实现 对照表（含"哪些是我编的"）
+#   * IMPLEMENTATION_ROADMAP.md —— 后续任务路线图（含自评、面试答辩话术）
+# 它们留在本地 docs/ 下方便自己翻，但不该出现在公开仓库里。
+docs/PROJECT_STUDY_GUIDE.md
+docs/FEATURE_MATRIX.md
+docs/IMPLEMENTATION_ROADMAP.md
+
+# ---- 本地工作区记录（AI 助手的工作日志 / 会话记忆）----
+# 里面记的是"这一轮干了什么"的过程性内容，属于本地私有状态，
+# 不是项目资料。用 .workbuddy/ 固定放，永远不进仓库。
+.workbuddy/
+
+# ---- 本机构建辅助脚本（路径写死在这台机器上，没有移植价值）----
+tools/_env_msvc.sh
+tools/_local_build_check.bat
+
 # ---- 发布产物（tools\package_release.ps1 的输出）----
 # 绿色版目录与 zip 是**发布附件**，通过 GitHub Release 上传，不进版本库
 dist/

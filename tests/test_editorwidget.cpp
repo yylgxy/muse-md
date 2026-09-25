@@ -891,6 +891,97 @@ int main(int argc, char *argv[])
         }
     }
 
+    // ============================ R. 焦点模式（C5）============================
+    //
+    // 焦点模式真正难的地方不是"淡化怎么画"，而是**只画视口内的**：
+    // extraSelection 是覆盖全文档的，几千段的长文里一次构造几千个选区，
+    // 每滚动一格重算一次 —— 那是"看着能用、滚起来卡"。所以这里要钉两件事：
+    //   1. 区间减法（视口 − 当前段落）在三种边界上不出反向区间；
+    //   2. ★ 淡化覆盖的字符数只占全文极小一部分（= 确实是按视口算的，不是按全文算的）。
+    {
+        using Range = EditorWidget::LineRange;
+        const auto ranges = EditorWidget::dimRanges(1, 10, 4, 6);
+        check(ranges.size() == 2 && ranges.at(0).first == 1 && ranges.at(0).last == 3 && ranges.at(1).first == 7
+                  && ranges.at(1).last == 10,
+              QStringLiteral("焦点模式: 视口 1-10 / 段落 4-6 -> 淡化 1-3 与 7-10"),
+              QStringLiteral("size=%1").arg(ranges.size()));
+
+        check(EditorWidget::dimRanges(1, 10, 1, 12).isEmpty(),
+              QStringLiteral("焦点模式: 段落盖住整个视口 -> 没有要淡化的行"));
+        check(EditorWidget::dimRanges(5, 10, 1, 3).size() == 1
+                  && EditorWidget::dimRanges(5, 10, 1, 3).first().first == 5
+                  && EditorWidget::dimRanges(5, 10, 1, 3).first().last == 10,
+              QStringLiteral("焦点模式: 段落整个在视口上方 -> 视口内全淡化"));
+        check(EditorWidget::dimRanges(5, 10, 20, 25).size() == 1
+                  && EditorWidget::dimRanges(5, 10, 20, 25).first().first == 5,
+              QStringLiteral("焦点模式: 段落整个在视口下方 -> 视口内全淡化"));
+        check(EditorWidget::dimRanges(0, 10, 4, 6).isEmpty() && EditorWidget::dimRanges(10, 5, 4, 6).isEmpty(),
+              QStringLiteral("焦点模式: 非法视口范围 -> 空结果（不崩、不出反向区间）"));
+    }
+
+    {
+        // 2000 段（每段一行 + 一个空行），光标停在第 5 行
+        QStringList lines;
+        for (int i = 0; i < 2000; ++i) {
+            lines << QStringLiteral("第 %1 段的正文字符").arg(i);
+            lines << QString();
+        }
+        EditorWidget editor;
+        editor.setPlainText(lines.join(QLatin1Char('\n')));
+
+        check(editor.extraSelections().size() == 1, QStringLiteral("焦点模式: 关闭时只有当前行那一条"),
+              QString::number(editor.extraSelections().size()));
+        check(!editor.isFocusMode(), QStringLiteral("焦点模式: 默认是关的"));
+
+        moveCursorTo(editor, 4);  // 第 5 行
+        editor.setFocusMode(true);
+        const QList<QTextEdit::ExtraSelection> sels = editor.extraSelections();
+
+        check(editor.isFocusMode(), QStringLiteral("焦点模式: 打开后 isFocusMode() 是 true"));
+        check(sels.size() >= 2 && sels.size() <= 3,
+              QStringLiteral("焦点模式: ★选区条数与文档规模无关（当前行 + 最多两个淡化区间）"),
+              QStringLiteral("条数=%1（文档 2000 段）").arg(sels.size()));
+        check(!sels.isEmpty() && sels.first().format.background().style() != Qt::NoBrush,
+              QStringLiteral("焦点模式: 第一条仍然是「当前行高亮」（背景色）"));
+
+        if (sels.size() >= 2) {
+            // 淡化区必须是**半透明的前景色**：不透明的浅色会把语法高亮整片盖掉
+            const QBrush brush = sels.at(1).format.foreground();
+            check(brush.style() != Qt::NoBrush, QStringLiteral("焦点模式: 淡化区设了前景色"));
+            check(brush.color().alpha() < 255, QStringLiteral("焦点模式: ★淡化色是半透明的（盖不住语法高亮）"),
+                  QStringLiteral("alpha=%1").arg(brush.color().alpha()));
+        }
+
+        // ★ 关键：淡化覆盖的字符数只占全文极小一部分 —— 证明它是按视口算的，不是按全文算的。
+        int dimChars = 0;
+        for (int i = 1; i < sels.size(); ++i) {
+            dimChars += static_cast<int>(sels.at(i).cursor.selectedText().size());
+        }
+        const int totalChars = editor.toPlainText().size();
+        check(dimChars * 10 < totalChars,
+              QStringLiteral("焦点模式: ★淡化区只覆盖视口那一小段（< 全文 1/10）"),
+              QStringLiteral("淡化 %1 字符 / 全文 %2 字符").arg(dimChars).arg(totalChars));
+
+        editor.setFocusMode(false);
+        check(editor.extraSelections().size() == 1, QStringLiteral("焦点模式: 关掉之后回到只有当前行那一条"),
+              QString::number(editor.extraSelections().size()));
+        check(!editor.isFocusMode(), QStringLiteral("焦点模式: isFocusMode() 跟着回到 false"));
+    }
+
+    {
+        // 空文档 / 单行文档也不能崩（第一行就是当前段，没有"上面那一段"）
+        EditorWidget editor;
+        editor.setFocusMode(true);
+        check(editor.extraSelections().size() == 1, QStringLiteral("焦点模式: 空文档只有当前行那一条"),
+              QString::number(editor.extraSelections().size()));
+
+        editor.setPlainText(QStringLiteral("只有一行"));
+        editor.setFocusMode(true);
+        check(editor.extraSelections().size() == 1,
+              QStringLiteral("焦点模式: 单行文档没有可淡化的行（不崩）"),
+              QString::number(editor.extraSelections().size()));
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== EditorWidget 契约测试：全部通过 ===\n");
     } else {

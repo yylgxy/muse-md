@@ -22,6 +22,7 @@
 #include <cstdio>
 
 using markdown_editor::core::storage::VersionControl;
+using markdown_editor::core::document::LineDiff;
 
 namespace {
 
@@ -216,6 +217,70 @@ int main(int argc, char *argv[])
         const QString emojiDiff = vc.diff(repoDir, hash2, hash3, &err);
         check(emojiDiff.contains(QStringLiteral("emoji 🎉")),
               QStringLiteral("diff: 快照里的 emoji 可读（说明按 UTF-8 存/读）"));
+    }
+
+    // ---------------- B1：自研行级 diff 接进版本历史 ----------------
+    // 这一节的价值不在"多了个函数"，而在**两条独立实现互相印证**：
+    // git 的 diff 和自研的 LineDiff 是两个完全不同的实现，它们在"增删行数"上
+    // 必须给出同样的答案。任何一边写错都会被这一条抓住。
+    {
+        // 第一条提交没有父提交 → 旧文本当空 → 全是新增
+        const LineDiff::Result first = vc.diffWithParentLocal(repoDir, hash1, &err);
+        check(err.isEmpty() && first.deletedLines == 0 && first.insertedLines == 4,
+              QStringLiteral("diffWithParentLocal: 第一个提交无父提交 → 全是新增（4 行）"),
+              err.isEmpty() ? QStringLiteral("%1增/%2删").arg(first.insertedLines).arg(first.deletedLines)
+                            : err);
+
+        // 第二条相对第一条：只改了一行 → 1 增 1 删
+        const LineDiff::Result second = vc.diffWithParentLocal(repoDir, hash2, &err);
+        check(err.isEmpty() && second.insertedLines == 1 && second.deletedLines == 1,
+              QStringLiteral("diffWithParentLocal: 改一行 = 1 增 1 删"),
+              err.isEmpty() ? QStringLiteral("%1增/%2删").arg(second.insertedLines).arg(second.deletedLines)
+                            : err);
+        // 结构化结果：改动落在**最后一行**，所以是 Equal(3行) / Delete(1行) / Insert(1行) 三块
+        // —— 末尾没有多余的 Equal 块（"改了最后一行"和"改了中间一行"的块数不一样，
+        // 这也正是"结构"比"一段文本"好用的地方）。
+        bool shapeOk = second.hunks.size() == 3;
+        if (shapeOk) {
+            shapeOk = second.hunks.at(0).kind == LineDiff::Kind::Equal
+                      && second.hunks.at(0).oldCount == 3
+                      && second.hunks.at(1).kind == LineDiff::Kind::Delete
+                      && second.hunks.at(1).oldStart == 4
+                      && second.hunks.at(2).kind == LineDiff::Kind::Insert;
+        }
+        check(shapeOk,
+              QStringLiteral("diffWithParentLocal: 返回的是**结构**（Equal3 / Delete1 / Insert1）"),
+              QStringLiteral("实际 %1 块").arg(second.hunks.size()));
+
+        // ★ 与 git 那条路对拍（数 +/- 行，跳过 --- / +++ 两个头）
+        const QString gitText = vc.diffWithParent(repoDir, hash2, &err);
+        int gitPlus = 0;
+        int gitMinus = 0;
+        for (const QString &row : gitText.split(QLatin1Char('\n'))) {
+            if (row.startsWith(QStringLiteral("+++")) || row.startsWith(QStringLiteral("---"))) {
+                continue;
+            }
+            if (row.startsWith(QLatin1Char('+'))) {
+                ++gitPlus;
+            } else if (row.startsWith(QLatin1Char('-'))) {
+                ++gitMinus;
+            }
+        }
+        check(second.insertedLines == gitPlus && second.deletedLines == gitMinus,
+              QStringLiteral("对拍: 自研 diff 与 git diff 的增删行数一致"),
+              QStringLiteral("自研 %1/%2，git %3/%4")
+                  .arg(second.insertedLines)
+                  .arg(second.deletedLines)
+                  .arg(gitPlus)
+                  .arg(gitMinus));
+
+        // 结构化结果能转回给人看的文本（界面"与上一版对比"走的就是这一步）
+        const QStringList oldLines = LineDiff::splitLines(vc.contentOf(repoDir, hash1, &err));
+        const QStringList newLines = LineDiff::splitLines(vc.contentOf(repoDir, hash2, &err));
+        const QString localText = LineDiff::toUnifiedText(second, oldLines, newLines, 3);
+        check(localText.contains(QStringLiteral("-旧的一行"))
+                  && localText.contains(QStringLiteral("+中文修改")),
+              QStringLiteral("diffWithParentLocal: 转成文本后能看出删了哪行、加了哪行"));
     }
 
     // ---------------- 信号 + 自动备注 ----------------

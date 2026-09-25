@@ -4,7 +4,11 @@
 #include "logger.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStyle>
 #include <QWidget>
 
@@ -108,9 +112,218 @@ ThemePalette ThemeManager::editorPalette(Theme theme)
     return (theme == Theme::Dark) ? ThemePalette::dark() : ThemePalette::light();
 }
 
+ThemePalette ThemeManager::currentPalette() const
+{
+    if (m_hasCustomTheme) {
+        return m_customPalette;
+    }
+    return editorPalette(m_theme);
+}
+
 QString ThemeManager::storageKey()
 {
     return QStringLiteral("theme");
+}
+
+// ============================================================================
+// 主题导入导出（C7）
+// ============================================================================
+
+QString ThemeManager::themesDirectory() const
+{
+    // 自定义主题放 AppData（和配置、快照仓库同级），不往用户文档目录塞文件。
+    // 根目录直接取 ConfigManager::filePath() 的父目录 —— 这样 themes/ 和 config.ini、
+    // history/（快照仓库）落在同一个 <AppData>/Dev/MarkdownEditor/ 下，路径是统一的。
+    // 测试里 ConfigManager 指向临时文件时，这里自然也跟着落到临时目录，不会碰用户数据。
+    const QString config = ConfigManager::filePath();
+    const int slash = qMax(config.lastIndexOf(QLatin1Char('/')), config.lastIndexOf(QLatin1Char('\\')));
+    const QString root = (slash >= 0) ? config.left(slash) : QStringLiteral(".");
+    return root + QStringLiteral("/themes");
+}
+
+bool ThemeManager::exportTheme(const QString &path, QString *error) const
+{
+    const auto fail = [error](const QString &why) {
+        if (error != nullptr) {
+            *error = why;
+        }
+        return false;
+    };
+
+    if (path.isEmpty()) {
+        return fail(QStringLiteral("没有指定导出路径"));
+    }
+
+    // 导出的是**当前**配色（可能是自定义主题，也可能就是内置亮/暗）——
+    // 用户想分享他正在用的样子，这是最直觉的语义。
+    const QJsonObject obj = currentPalette().toJson();
+    const QJsonDocument doc(obj);
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return fail(QStringLiteral("写不进 %1：%2").arg(path, file.errorString()));
+    }
+    file.write(doc.toJson(QJsonDocument::Indented));
+    return true;
+}
+
+bool ThemeManager::importTheme(const QString &path, const QString &name, QString *error)
+{
+    const auto fail = [error](const QString &why) {
+        if (error != nullptr) {
+            *error = why;
+        }
+        return false;
+    };
+
+    if (path.isEmpty()) {
+        return fail(QStringLiteral("没有指定要导入的文件"));
+    }
+
+    QString readError;
+    const ThemePalette palette = paletteFromFile(path, &readError);
+    if (readError.isEmpty() == false) {
+        return fail(readError);
+    }
+
+    // WCAG 校验：正文和语法色对底色都要能看清（和内置主题同一条硬要求）。
+    // 导入一个"看不清"的主题，用户第一眼就会以为软件坏了，所以这里直接拒绝，
+    // 并把"哪个颜色不合格、对比度多少"说清楚 —— 让人能改，而不是只给一句"不行"。
+    const auto requireContrast = [](const QString &label, const QColor &fg, const QColor &bg,
+                                    double minimum, QString *bad) {
+        const double ratio = ThemePalette::contrastRatio(fg, bg);
+        if (ratio < minimum) {
+            *bad = QStringLiteral("%1 对底色对比度 %2，低于 %3")
+                       .arg(label)
+                       .arg(ratio, 0, 'f', 2)
+                       .arg(minimum, 0, 'f', 1);
+            return false;
+        }
+        return true;
+    };
+    QString bad;
+    const QColor &bg = palette.editorBackground;
+    if (!requireContrast(QStringLiteral("正文"), palette.editorForeground, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("标题"), palette.heading, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("粗体"), palette.bold, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("斜体"), palette.italic, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("行内代码"), palette.inlineCodeForeground, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("链接"), palette.link, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("引用"), palette.blockQuote, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("列表标记"), palette.listMarker, bg, 4.5, &bad)
+        || !requireContrast(QStringLiteral("代码块文字"), palette.codeBlockForeground, bg, 4.5, &bad)) {
+        return fail(QStringLiteral("对比度校验不过：%1").arg(bad));
+    }
+
+    // 落盘：文件名用 name（传空则用原文件名去后缀），确保安全（去掉路径分隔符）。
+    QString base = name;
+    if (base.isEmpty()) {
+        base = QFileInfo(path).completeBaseName();
+    }
+    base = base.simplified();
+    base.replace(QLatin1Char('/'), QLatin1Char('_'));
+    base.replace(QLatin1Char('\\'), QLatin1Char('_'));
+    if (base.isEmpty()) {
+        base = QStringLiteral("imported");
+    }
+
+    const QString dir = themesDirectory();
+    if (!QDir().mkpath(dir)) {
+        return fail(QStringLiteral("建不出主题目录 %1").arg(dir));
+    }
+    const QString target = dir + QLatin1Char('/') + base + QStringLiteral(".json");
+
+    QFile file(target);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return fail(QStringLiteral("写不进 %1：%2").arg(target, file.errorString()));
+    }
+    file.write(QJsonDocument(palette.toJson()).toJson(QJsonDocument::Indented));
+
+    m_importedThemePath = target;
+    return true;
+}
+
+QString ThemeManager::importedThemePath() const
+{
+    return m_importedThemePath;
+}
+
+QList<QPair<QString, QString>> ThemeManager::customThemes() const
+{
+    QList<QPair<QString, QString>> result;
+    const QDir dir(themesDirectory());
+    if (!dir.exists()) {
+        return result;
+    }
+    const QFileInfoList files = dir.entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const QFileInfo &info : files) {
+        result.append(qMakePair(info.completeBaseName(), info.absoluteFilePath()));
+    }
+    return result;
+}
+
+ThemePalette ThemeManager::paletteFromFile(const QString &path, QString *error)
+{
+    const auto fail = [error](const QString &why) {
+        if (error != nullptr) {
+            *error = why;
+        }
+        return ThemePalette();
+    };
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        fail(QStringLiteral("读不到 %1：%2").arg(path, file.errorString()));
+        return ThemePalette();
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        fail(QStringLiteral("%1 不是有效的主题 JSON：%2").arg(path, parseError.errorString()));
+        return ThemePalette();
+    }
+
+    ThemePalette palette;
+    if (!ThemePalette::fromJson(doc.object(), &palette, error)) {
+        return ThemePalette();
+    }
+    return palette;
+}
+
+void ThemeManager::applyCustomTheme(const ThemePalette &palette, Theme baseTheme)
+{
+    // 先切 QSS（控件外观用亮/暗二选一），再记住自定义配色。
+    // 顺序：先 setTheme 把 QSS/调色板铺好，再设 m_hasCustomTheme + 存配色，
+    // 最后发一个 themeChanged 让编辑器/预览拿新配色重绘。
+    setTheme(baseTheme);
+
+    m_customPalette = palette;
+    m_hasCustomTheme = true;
+
+    // 复用 themeChanged 信号把自定义配色推给编辑器/预览。
+    // 注意：setTheme 已经发过一次 themeChanged（baseTheme），这里再发一次，
+    // 消费方（编辑器）拿到的 currentPalette() 已经是最新的自定义配色 ——
+    // 第一次是"QSS 换好了"，第二次是"配色换成自定义的了"，各管一半。
+    emit themeChanged(m_theme);
+
+    LOG_INFO("已应用自定义主题（控件外观跟随 %1）", themeId(baseTheme));
+}
+
+void ThemeManager::clearCustomTheme()
+{
+    if (!m_hasCustomTheme) {
+        return;
+    }
+    m_hasCustomTheme = false;
+    m_customPalette = ThemePalette();
+    emit themeChanged(m_theme);
+    LOG_INFO("已清除自定义主题，回到内置%1主题", themeId(m_theme));
+}
+
+bool ThemeManager::hasCustomTheme() const
+{
+    return m_hasCustomTheme;
 }
 
 void ThemeManager::setTheme(Theme theme)

@@ -8,6 +8,18 @@ using markdown_editor::infrastructure::Logger;
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
+
+    // ---- 产品名统一（D3）----
+    // 对外显示的名字统一成 **muse-md**：和仓库名、README 标题、安装包名（MuseMD-setup）一致。
+    // 面试官点开 GitHub 再跑一次程序，对不上是很掉分的细节。
+    a.setApplicationDisplayName(QStringLiteral("muse-md"));
+
+    // 但**存储标识**故意不动，仍然是 MarkdownEditor：
+    // QStandardPaths::AppDataLocation 是用 applicationName 拼出来的
+    //   （<AppData>/Dev/MarkdownEditor/），这里有用户的配置、全文索引、版本历史快照。
+    // 一改名，这些数据不会消失，但程序再也找不到了 —— 在用户眼里就是"配置和历史都没了"。
+    // 所以：**产品名与存储标识解耦**，显示叫 muse-md，落盘路径保持稳定。
+    // （哪天要真的迁移，得写一次性的目录搬移 + 回滚方案，不能靠改这一行搞定。）
     a.setApplicationName("MarkdownEditor");
     a.setOrganizationName("Dev");
 #ifdef APP_VERSION

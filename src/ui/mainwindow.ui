@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Markdown 编辑器</string>
+   <string>muse-md</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QHBoxLayout" name="centralLayout">
@@ -62,6 +62,20 @@
    </attribute>
    <widget class="FileTreeView" name="fileTree"/>
   </widget>
+  <!-- 左侧停靠面板：大纲（C4）。
+       和文件树**叠在同一个停靠区**（tabifyDockWidget 在 initUi() 里做），底部多一个
+       页签来切换"文件 / 大纲"—— 不新开一列，三栏布局（侧栏 + 编辑器 + 预览）一点没动。
+       放左侧而不是右侧/底部：右侧和预览抢地方（预览是核心），底部和全文搜索抢地方
+       （搜索结果需要宽度）。 -->
+  <widget class="QDockWidget" name="outlineDock">
+   <property name="windowTitle">
+    <string>大纲</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>1</number>
+   </attribute>
+   <widget class="OutlinePanel" name="outlinePanel"/>
+  </widget>
   <!-- 底部停靠面板：全文搜索（可隐藏）。
        搜索结果有"文件 / 行号 / 内容"三列，放在底部而不是左右，宽度更够用。 -->
   <widget class="QDockWidget" name="searchDock">
@@ -108,6 +122,14 @@
    <class>SearchPanel</class>
    <extends>QWidget</extends>
    <header>searchpanel.h</header>
+  </customwidget>
+  <!-- OutlinePanel 继承 QWidget，header 指向 outlinepanel.h。
+       ⚠️ 漏掉这一段登记，uic 就不会生成 #include "outlinepanel.h"，
+       编译期会报"未知控件类 OutlinePanel"，而且报错信息完全看不出原因。 -->
+  <customwidget>
+   <class>OutlinePanel</class>
+   <extends>QWidget</extends>
+   <header>outlinepanel.h</header>
   </customwidget>
  </customwidgets>
  <resources/>
