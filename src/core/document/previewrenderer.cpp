@@ -1,8 +1,10 @@
 #include "previewrenderer.h"
 
 #include "codehighlighter.h"
+#include "linediff.h"
 #include "logger.h"
 #include "markdownparser.h"
+#include "parsecache.h"
 #include "syncbridge.h"
 
 #include <QFile>
@@ -131,6 +133,7 @@ bool PreviewRenderer::loadTemplate(const QString &baseDir, QString *error)
     }
 
     m_ready = false;  // 页面要重新加载，等 loadFinished 之后才能推内容
+    m_lastPushed.clear();  // 页面换了：旧"已推内容"作废，下次必须重推（哪怕内容一样）
     emit pageReadyChanged(false);
 
     // 记住这次用的目录：渲染进程崩了要照原样重载（见 onRenderProcessTerminated）
@@ -291,6 +294,27 @@ void PreviewRenderer::pushNow()
         return;
     }
 
+    // ---- 内容相同短路（#2 的轻量版）----
+    // 切标签回来、撤销又改回来、主题切换后补推，这些"内容其实没变"的推送很常见。
+    // 内容一字不差时什么都不做：省掉一次 md4c 全量解析 + 代码高亮 + 行号扫描 +
+    // 一次 JS 推送给 Chromium（后者会触发整页重排）。这是三级演进里最容易、零风险的一级。
+    if (m_desired == m_lastPushed) {
+        return;
+    }
+
+    // ---- 增量刷新（#2）：先量改动规模，日志里留一句"这次是大改还是小改"----
+    // 完整的三级演进（整页 → 局部替换 → 段落级 patch）里，patch 需要 MarkdownParser
+    // 支持"块级独立解析"，而 md4c 是全文档原子解析、块级解析会破坏列表/引用的跨块语义。
+    // 所以当前"增量"落在最稳的一级：内容相同直接跳过（上面）；改动规模这里只做观测，
+    // 为将来引入块级解析铺路（降级闸门的判定逻辑已经在 computeChangeStats 里实现并测过）。
+    if (!m_lastPushed.isEmpty()) {
+        const ChangeStats stats = computeChangeStats(m_lastPushed, m_desired);
+        LOG_INFO("预览刷新：改动 %1 行（覆盖 %2% 块）%3",
+                 stats.changedLines,
+                 int(stats.changedBlockRatio * 100.0),
+                 stats.degraded ? QStringLiteral("，diff 已降级") : QString());
+    }
+
     // ---- 内容上限：超限不硬推，改成推一段"内容太大"的说明 ----
     // 这一条是"预览永远不会被内容拖死"的保证：几 MB 的文本走 md4c → HTML → 几 MB 的
     // JS 字符串塞给 Chromium，会把这个渲染进程拖到卡死甚至被杀，而杀了之后预览就再也不恢复。
@@ -302,6 +326,7 @@ void PreviewRenderer::pushNow()
                                 .arg(m_desired.size())
                                 .arg(kMaxContentChars));
         emit contentRendered();  // 页面确实换过内容了：让界面重新对齐滚动位置
+        m_lastPushed = m_desired;
         return;
     }
 
@@ -313,6 +338,7 @@ void PreviewRenderer::pushNow()
 
     m_page->runJavaScript(buildApplyScript(html, lineMap));
 
+    m_lastPushed = m_desired;
     emit contentRendered();
 }
 
@@ -380,6 +406,58 @@ QUrl PreviewRenderer::baseUrlFromDir(const QString &baseDir)
     // 结尾必须有 '/'：否则相对路径 "a.png" 会被解析成"上一级目录里的 a.png"
     const QString dir = baseDir.endsWith(QLatin1Char('/')) ? baseDir : baseDir + QLatin1Char('/');
     return QUrl::fromLocalFile(dir);
+}
+
+// ============================ 增量刷新（#2）============================
+
+PreviewRenderer::ChangeStats PreviewRenderer::computeChangeStats(const QString &oldMarkdown,
+                                                                 const QString &newMarkdown)
+{
+    ChangeStats stats;
+
+    const QStringList oldLines = LineDiff::splitLines(oldMarkdown);
+    const QStringList newLines = LineDiff::splitLines(newMarkdown);
+    const LineDiff::Result diff = LineDiff::compute(oldLines, newLines);
+
+    stats.degraded = diff.degraded;
+    stats.changedLines = diff.insertedLines + diff.deletedLines;
+
+    // 改动覆盖的块占比：用 ParseCache 的块切分 + 改动行区间反查。
+    // 只统计"删改"涉及的行（Insert 行在新文里没有对应旧块，但旧块的失效才是增量要关心的），
+    // 所以这里用 oldText 的块 + diff 里 Delete 行 + Equal 边界来估算。
+    // 简化：把"改动行区间"（最小到最大改动行）覆盖到的旧块数 / 旧块总数。
+    const QList<ParseCache::Block> oldBlocks = ParseCache::splitBlocks(oldMarkdown);
+    if (oldBlocks.isEmpty() || diff.identical()) {
+        stats.changedBlockRatio = oldBlocks.isEmpty() ? 0.0 : 0.0;
+        return stats;
+    }
+
+    // 找出改动行区间（1 起算，取 Delete 行 + Insert 在旧文侧的锚点）。
+    int minLine = -1;
+    int maxLine = -1;
+    for (const LineDiff::Hunk &h : diff.hunks) {
+        if (h.kind == LineDiff::Kind::Delete) {
+            for (int i = 0; i < h.oldCount; ++i) {
+                const int line = h.oldStart + i;
+                if (minLine < 0 || line < minLine) minLine = line;
+                if (line > maxLine) maxLine = line;
+            }
+        } else if (h.kind == LineDiff::Kind::Insert) {
+            // Insert 在旧文里没有行，用 newStart 在旧文里的"插入点"当锚：oldStart。
+            // 但 LineDiff 的 Insert 块 oldStart 就是插入点（见 linediff.h 的 Hunk 注释）。
+            const int line = h.oldStart;
+            if (minLine < 0 || line < minLine) minLine = line;
+            if (line > maxLine) maxLine = line;
+        }
+    }
+
+    if (minLine < 0) {
+        return stats;  // 理论上走不到（非 identical 必有改动）
+    }
+
+    const QList<int> touched = ParseCache::blocksOverlapping(oldBlocks, minLine, maxLine);
+    stats.changedBlockRatio = double(touched.size()) / double(oldBlocks.size());
+    return stats;
 }
 
 }  // namespace markdown_editor::core::document

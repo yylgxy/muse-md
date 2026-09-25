@@ -18,13 +18,22 @@ namespace markdown_editor::core::storage {
 //      所以它确实是 LRU，而不是按插入顺序淘汰。
 //      （Qt 文档只说了"淘汰最久未使用的"，实际上有些容器是插入顺序，所以这里专门验证过：
 //        容量 2，插入 A、B，访问 A，再插入 C → 被淘汰的是 B，A 活了下来。）
-//   2. 它的 maxCost 是"代价预算"，**不是条数**。本类让每条记录的代价恒为 1，
-//      于是 setMaxEntries(n) 就等于 setMaxCost(n)，语义变成"最多缓存 n 个文件"。
-//      这样做的目的很实在：避免"代价"和"条数"两套计数各说各话、淘汰行为看不懂。
+//   2. 它的 maxCost 是"代价预算"，**不是条数**。
 //
-// ---- 为什么除了条数还要限制单条大小 ----
-// 条数限制挡不住"一个 300MB 的文件进缓存"。所以再加一道 maxEntryBytes：
-// 超过这个大小的文件直接不进缓存（记一笔 rejections）。两头都约束了，才算真的"避免内存溢出"。
+// ---- #8 内存治理：从"条数计数"升级为"字节配额 + 按大小分桶" ----
+// 原来的模型是"每条记录的代价恒为 1"，于是 setMaxEntries(n) 就等于 setMaxCost(n)，
+// 淘汰只按"条数"走。问题在于：一个 900KB 的大文件和十个 90KB 的小文件，在条数模型下
+// 占用完全一样，但真实内存差了一个数量级 —— 淘汰"按条数"会让一个大文件挤掉许多小文件。
+// 所以改成：
+//   1. **代价 = 内容的字节数**（entry.text 的 UTF-8 字节数），让淘汰真正按内存量走。
+//      于是 maxCost 的语义从"最多几条"变成"总字节预算"（默认 8 MiB）。
+//   2. **按文件大小分三档**：≤64KB 随便进、≤512KB 限量、≤1MB 严格限量、超 1MB 拒收。
+//      分桶是为了给不同量级的文件不同的配额约束，而不是一刀切。
+//
+// ---- 为什么除了字节预算还要限制单条大小 ----
+// 字节预算挡不住"一个 300MB 的文件进缓存"（它自己就超预算了，但会挤掉所有别人）。
+// 所以再加一道 maxEntryBytes：超过这个大小的文件直接不进缓存（记一笔 rejections）。
+// 两头都约束了，才算真的"避免内存溢出"。
 //
 // ---- 过期判断：比 LRU 更要紧的是正确性 ----
 // 缓存里存的是"内容快照"，而磁盘上的文件可能被别的程序改过（编辑器、同步盘、脚本……）。
@@ -32,14 +41,31 @@ namespace markdown_editor::core::storage {
 // 不一致就返回 Stale，调用方必须重新读盘。
 // 少了这一步，用户会拿着内存里的旧内容去覆盖别人刚写的新内容 —— 缓存反倒成了丢数据的帮凶。
 //
+// ---- 淘汰统计（证明缓存真的有用）----
+// 除了原来的 hits/misses/stale 命中率，新增两个"按字节"的硬指标：
+//   * evictedBytes()：被淘汰的记录总共释放了多少字节（证明"字节配额"在起作用）
+//   * savedReads()：命中缓存省了多少次磁盘读（= hits 数，单独命名是为了面试时好讲）
+//
 // 分层：本类不认识 MarkdownDocument，也不认识 FileManager，只是"路径 → 文件内容"的缓存。
 class CacheManager
 {
 public:
-    // 默认最多缓存多少个文件
-    static constexpr int kDefaultMaxEntries = 20;
+    // 默认总字节预算 8 MiB（原来"20 个文件"的条数模型下，20×400KB 大约也是这个量级，
+    // 所以 8 MiB 是一个"行为不会突然变差"的保守起点）。
+    static constexpr qint64 kDefaultMaxBytes = 8 * 1024 * 1024;
     // 默认单条上限 1 MiB（Markdown 文档极少超过这个量级）
     static constexpr qint64 kDefaultMaxEntryBytes = 1024 * 1024;
+
+    // ---- 文件大小分桶阈值（#8）----
+    static constexpr qint64 kSmallThreshold = 64 * 1024;    // ≤64KB 随便进
+    static constexpr qint64 kMediumThreshold = 512 * 1024;  // ≤512KB 限量
+    static constexpr qint64 kLargeThreshold = 1024 * 1024;  // ≤1MB 严格限量，超了拒收
+
+    // 按文件大小分桶。用枚举而不是魔法数，让"哪个区间算大文件"只有一份定义。
+    enum class Tier { Small, Medium, Large };
+
+    // 一个文件属于哪一档（纯函数，能单独测）。
+    static Tier tierOf(qint64 bytes);
 
     // 一条缓存记录：内容 + 编码 + 缓存时刻的磁盘状态（后两项用于判断是否过期）
     struct Entry
@@ -55,19 +81,23 @@ public:
     // 而且这两件事都值得各记一笔统计（否则永远不知道缓存为什么没起作用）。
     enum class LookupResult { Hit, Stale, Miss };
 
-    explicit CacheManager(int maxEntries = kDefaultMaxEntries);
+    explicit CacheManager(qint64 maxBytes = kDefaultMaxBytes);
 
     // ============================ 容量 ============================
 
-    int maxEntries() const;
+    // 总字节预算（QCache 的 maxCost）。淘汰按"内容字节数"走。
+    qint64 maxBytes() const;
 
-    // 最多缓存多少个文件。传 <= 0 表示**关掉缓存**：插入一律被拒（记入 rejections）。
-    void setMaxEntries(int count);
+    // 设总字节预算。传 <= 0 表示**关掉缓存**：插入一律被拒（记入 rejections）。
+    void setMaxBytes(qint64 bytes);
 
     qint64 maxEntryBytes() const;
 
     // 单条内容超过这个字节数就不进缓存。传 <= 0 表示不限制单条大小。
     void setMaxEntryBytes(qint64 bytes);
+
+    // 当前缓存里所有记录的内容字节总和（用于状态栏显示"吃了多少内存"）。
+    qint64 currentBytes() const;
 
     // ============================ 查 / 存 / 删 ============================
 
@@ -82,7 +112,7 @@ public:
 
     // 存入（同一路径会覆盖旧记录）。
     // 返回 false 表示没有被缓存：缓存被关掉、或者内容超过 maxEntryBytes。
-    // 超出容量时 QCache 会自动淘汰最久未使用的那条。
+    // 超出字节预算时 QCache 会自动淘汰最久未使用的记录（代价 = 内容字节数）。
     bool insert(const QString &path, const Entry &entry);
 
     void remove(const QString &path);
@@ -99,8 +129,10 @@ public:
     qint64 misses() const;
     qint64 staleCount() const;
     qint64 insertions() const;
-    qint64 rejections() const;  // 因为缓存被关掉 / 单条太大而没进缓存的次数
-    qint64 evictions() const;   // 粗略计数：插入后条数没增加（说明挤掉了别人）
+    qint64 rejections() const;   // 因为缓存被关掉 / 单条太大而没进缓存的次数
+    qint64 evictions() const;    // 被淘汰的记录条数
+    qint64 evictedBytes() const; // 被淘汰的记录总共释放了多少字节（#8：字节级证据）
+    qint64 savedReads() const;   // 命中缓存省了多少次磁盘读（= hits，#8：语义化命名）
     void resetStatistics();
 
     QString statisticsText() const;  // 一行可读统计，直接进日志
@@ -111,8 +143,11 @@ public:
     static QString normalizeKey(const QString &path);
 
 private:
-    // 缓存是否可用（容量 > 0）
+    // 缓存是否可用（字节预算 > 0）
     bool cacheEnabled() const;
+
+    // 一条记录的内容字节数（UTF-8）。既是 QCache 的 cost，也是淘汰统计的依据。
+    static qint64 entryBytes(const Entry &entry);
 
     QCache<QString, Entry> m_cache;  // 注意：QCache 持有 Entry*，淘汰/清空时会 delete 它们
 
@@ -124,6 +159,7 @@ private:
     qint64 m_insertions = 0;
     qint64 m_rejections = 0;
     qint64 m_evictions = 0;
+    qint64 m_evictedBytes = 0;  // 被淘汰记录释放的字节数（#8）
 };
 
 }  // namespace markdown_editor::core::storage

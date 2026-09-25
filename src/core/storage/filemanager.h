@@ -195,7 +195,7 @@ public:
     // 最近打开过的文件内容缓存（LRU）。打开文件时会先查它：
     //   命中且没过期 → 不读盘，直接用内存里的内容；
     //   过期（文件被别的程序改过）→ 重新读盘并覆盖缓存。
-    // 返回可写的指针是为了让 UI 能调 setMaxEntries()/statisticsText() 这类配置和统计。
+    // 返回可写的指针是为了让 UI 能调 setMaxBytes()/statisticsText() 这类配置和统计。
     CacheManager *cacheManager();
     const CacheManager *cacheManager() const;
 

@@ -455,11 +455,21 @@ target_link_libraries(test_textstats
 )
 add_test(NAME textstats COMMAND test_textstats)
 
+# ---------------- ParseCache 契约测试（#1 块级解析缓存）----------------
+add_executable(test_parsecache
+    test_parsecache.cpp
+)
+target_link_libraries(test_parsecache
+    core_document
+    Qt6::Core
+)
+add_test(NAME parsecache COMMAND test_parsecache)
+
 # Windows 上测试程序要加载 Qt 的 DLL，而 ctest 是在裸环境里启动程序的，
 # 不会自动带上 Qt 的 bin 目录 —— 不设置这里会直接以 0xC0000135（找不到 DLL）失败。
 # path_list_prepend 会按平台分隔符把目录加到 PATH 前面；
 # 不要手写 "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"，那样分号会被当成列表分隔符。
-set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager draftrecovery linediff outline textstats editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch searchindexworker outlinepanel exporter codehighlighter thememanager mainwindowlayout sessionstate endtoend syncscheduler PROPERTIES
+set_tests_properties(fileutils markdownparser database markdowndocument markdownhighlighter syncbridge previewrenderer filemanager versioncontrol cachemanager draftrecovery linediff outline textstats parsecache editorwidget tabmanager editorworkbench recentfiles filetreeview fulltextsearch searchindexworker outlinepanel exporter codehighlighter thememanager mainwindowlayout sessionstate endtoend syncscheduler PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
 )
 # 兜底依赖：改任何头文件都重编本目录的目标。

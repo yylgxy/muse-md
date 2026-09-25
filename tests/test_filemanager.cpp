@@ -390,9 +390,9 @@ int main(int argc, char *argv[])
             check(session.cacheManager()->size() > 0,
                   QStringLiteral("缓存: 打开之后这份内容进了缓存"),
                   QStringLiteral("%1 条").arg(session.cacheManager()->size()));
-            check(session.cacheManager()->maxEntries() > 0,
-                  QStringLiteral("缓存: 有条数上限（不会无限增长）"),
-                  QStringLiteral("上限 %1 条").arg(session.cacheManager()->maxEntries()));
+            check(session.cacheManager()->maxBytes() > 0,
+                  QStringLiteral("缓存: 有字节预算（不会无限增长）"),
+                  QStringLiteral("预算 %1 字节").arg(session.cacheManager()->maxBytes()));
         }
 
         // 上面那个 FileManager 已经销毁（等价于标签被关掉）：新的必须是"干净"的
@@ -590,7 +590,7 @@ int main(int argc, char *argv[])
     // 还用一个"铁证"来证明第二次真的没有读盘（见下面那段注释）。
     {
         FileManager files;
-        files.cacheManager()->setMaxEntries(2);  // 上限调小，方便验证淘汰
+        files.cacheManager()->setMaxBytes(32);  // 预算调小，方便验证淘汰（几行文本 32 字节够放 2~3 条）
 
         const QString docA = work + QStringLiteral("/cache-a.md");
         const QString docB = work + QStringLiteral("/cache-b.md");
@@ -645,13 +645,25 @@ int main(int argc, char *argv[])
         check(files.openFile(docA, &err) && files.text() == QStringLiteral("保存后的新内容\n"),
               QStringLiteral("缓存: 保存后重新打开，内容与磁盘一致"));
 
-        // ---- 淘汰：上限 2，访问一下 A 再打开 C，被淘汰的应该是 B（LRU）----
-        check(files.openFile(docB, &err), QStringLiteral("缓存: 打开 B"), err);
-        check(files.openFile(docA, &err), QStringLiteral("缓存: 再打开 A（刷新它的最近使用时间）"), err);
-        check(files.openFile(docC, &err), QStringLiteral("缓存: 打开 C（触发淘汰）"), err);
-        check(files.cacheManager()->size() == 2, QStringLiteral("缓存: 条数不超过上限"));
-        check(!files.cacheManager()->contains(docB), QStringLiteral("缓存: 最久未使用的 B 被淘汰"));
-        check(files.cacheManager()->contains(docA), QStringLiteral("缓存: 刚访问过的 A 还在（LRU）"));
+        // ---- 淘汰：用三个**独立、内容等长**的文件验证 LRU（字节预算模型下，长度必须可控）----
+        // 预算 32 字节，每条 16 字节恰好放 2 条；访问 A 再打开 C，被淘汰的应是 B（LRU）。
+        // 用独立文件而不是复用 docA：docA 在前面已被改成"保存后的新内容"（22 字节），
+        // 长度不再是 16 字节，会污染字节预算的推算。
+        const QString lruA = work + QStringLiteral("/lru-a.md");
+        const QString lruB = work + QStringLiteral("/lru-b.md");
+        const QString lruC = work + QStringLiteral("/lru-c.md");
+        FileUtils::writeFileBytes(lruA, QStringLiteral("甲甲甲甲甲\n").toUtf8());  // 5 字 + 换行 = 16 字节
+        FileUtils::writeFileBytes(lruB, QStringLiteral("乙乙乙乙乙\n").toUtf8());
+        FileUtils::writeFileBytes(lruC, QStringLiteral("丙丙丙丙丙\n").toUtf8());
+
+        files.cacheManager()->clear();
+        check(files.openFile(lruA, &err), QStringLiteral("缓存: 打开 A"), err);
+        check(files.openFile(lruB, &err), QStringLiteral("缓存: 打开 B"), err);
+        check(files.openFile(lruA, &err), QStringLiteral("缓存: 再打开 A（刷新它的最近使用时间）"), err);
+        check(files.openFile(lruC, &err), QStringLiteral("缓存: 打开 C（触发淘汰）"), err);
+        check(files.cacheManager()->size() == 2, QStringLiteral("缓存: 条数不超过预算能放下的条数"));
+        check(!files.cacheManager()->contains(lruB), QStringLiteral("缓存: 最久未使用的 B 被淘汰"));
+        check(files.cacheManager()->contains(lruA), QStringLiteral("缓存: 刚访问过的 A 还在（LRU）"));
 
         // ---- 计时参考（只打印不断言：机器负载会让时间抖动，断言会变成不稳定的测试）----
         QElapsedTimer timer;

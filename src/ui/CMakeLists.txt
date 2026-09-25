@@ -6,6 +6,8 @@ add_library(ui STATIC
     mainwindow.cpp
     exportdialog.h       # 5.6：导出对话框（只收集设置，干活的是 business 里的 Exporter）
     exportdialog.cpp
+    diffview.h           # #9：版本对比视图（行级红绿着色 + 双击跳编辑器）
+    diffview.cpp
 )
 
 # 让链接 ui 的目标（src/app）能直接 #include "mainwindow.h"

@@ -14,18 +14,21 @@
 #include "searchpanel.h"        // 5.5：全文搜索面板（.ui 里就是一个 SearchPanel）
 #include "outlinepanel.h"       // C4：大纲面板（.ui 里就是一个 OutlinePanel）
 #include "textstats.h"          // C5：写作统计（纯函数，进 core/document）
+#include "diffview.h"           // #9：版本对比视图（行级红绿着色 + 双击跳编辑器）
 #include "tabmanager.h"
 #include "thememanager.h"      // 5.7：亮暗主题（单例）
 
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
+#include <QDateTime>     // A3：草稿恢复的时间戳
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>  // 文件树/搜索面板是停靠窗口：要调 setFeatures 得用它
 #include <QDragEnterEvent>
+#include <QFile>        // A3：读草稿正文
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFileDialog>
@@ -52,6 +55,7 @@
 
 using markdown_editor::core::storage::CacheManager;
 using markdown_editor::core::storage::VersionControl;
+using markdown_editor::core::storage::DraftRecovery;  // A3：崩溃恢复草稿
 // 渲染管线的类型要写全名：它和 FileManager 不一样，以前只用到它的成员函数、不用提名字，
 // 现在要连它的信号（contentSkipped / rendererRestarted），所以需要这个 using。
 using markdown_editor::core::document::PreviewRenderer;
@@ -115,6 +119,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     m_syncScheduler.setSyncHandler([this](EditorWidget *editor) { syncEditorIntoFiles(editor); });
     m_syncScheduler.setDelay(EditorSyncScheduler::kDefaultDelayMs);
 
+    // ---- 崩溃恢复草稿（A3）：15 秒定时落盘 ----
+    // 草稿没必要精确到毫秒，VeryCoarseTimer 省电；而且只写"有未保存修改"的标签
+    //（storeDraftFor 内部会判 dirty），纯定时器 + 关键时机双触发，崩了也有得找回。
+    m_draftTimer.setInterval(15 * 1000);
+    m_draftTimer.setTimerType(Qt::VeryCoarseTimer);
+    connect(&m_draftTimer, &QTimer::timeout, this, &MainWindow::storeAllDrafts);
+    m_draftTimer.start();
+
     // ---- 拖拽打开（6.2）----
     // 主窗口接受拖放：把 .md 从资源管理器拖进来就能打开（实现在 dragEnterEvent/dropEvent）
     setAcceptDrops(true);
@@ -137,6 +149,10 @@ void MainWindow::finishStartup()
     // 它不该拖慢"窗口出现"。
     ui->fileTree->setRootPath(QDir::currentPath());
     syncSearchDirectoryToSidebar();
+
+    // A3：先问要不要恢复草稿，**再**恢复上次会话。
+    // 顺序不能反：如果先开了上次的文件，再恢复草稿时标签会重复（同一个文档开两次）。
+    offerDraftRecovery();
 
     // 恢复上次的会话（打开那些文件是这里最费时的一步）
     restoreSession();
@@ -1318,6 +1334,10 @@ void MainWindow::onCurrentTabChanged(EditorWidget *editor)
     // 那时文档管理器里必须是它的最新内容（否则会写盘一个旧版本）。
     m_syncScheduler.flushAll();
 
+    // A3：趁"离开的那个标签"还活着，把它没保存的内容落成草稿。
+    // 放在 flushAll 之后：先同步（让文档管理器有最新内容），再存草稿（草稿取编辑器的正文）。
+    storeDraftFor(m_lastEditor);
+
     // ★ C2：趁"离开的那个标签"还活着、还显示着，把它的光标与滚动位置记下来。
     //   必须在下面任何切换动作之前调 —— showSession() 推内容、
     //   setCurrentEditor() 接滚动条，都会把"它原来在哪"抹掉。
@@ -1496,6 +1516,117 @@ void MainWindow::onFileSaved(FileManager *files, const QString &path)
         // C4：另存为会换路径，大纲本身没变，但"这个面板说的是哪个文档"要跟上；
         // 保存也顺手刷一次，代价只有一次 O(行数) 扫描（正文没变的话结果一模一样）。
         refreshOutline(currentEditor());
+    }
+
+    // A3：文件已经真的落盘了，草稿就没意义了 —— 丢掉（幂等，没有也不报错）。
+    // 注意这里用 path（保存时传入的实际路径）：另存为之后草稿的旧 key 对应的是旧路径，
+    // 而这份草稿可能还挂在旧路径下，所以两个都清一遍更稳妥。
+    if (files->hasFilePath()) {
+        m_draftRecovery.discard(files->filePath());
+    }
+    if (!path.isEmpty()) {
+        m_draftRecovery.discard(path);
+    }
+}
+
+// ============================ 崩溃恢复草稿（A3）============================
+
+// 把某个编辑器的"未保存内容"落成草稿。只写 dirty 的（isSessionModified 已经把
+// "文档管理器说改过"和"编辑器自己说改过"合成了一次判断，这正是复用它而不是各写一份的地方）。
+void MainWindow::storeDraftFor(EditorWidget *editor)
+{
+    if (editor == nullptr) {
+        return;
+    }
+    FileManager *files = filesFor(editor);
+    if (files == nullptr) {
+        return;
+    }
+
+    // 只在有未保存修改时写：已经保存过的（内容与磁盘一致）没必要占草稿空间。
+    if (!isSessionModified(files, editor)) {
+        return;
+    }
+
+    DraftRecovery::Draft draft;
+    draft.documentPath = files->filePath();      // 空 = 新建未保存文档
+    draft.displayName = files->fileName();        // 没有路径时它就是"未命名 1"这类名字
+    draft.savedAt = QDateTime::currentDateTime();
+    const QTextCursor cursor = editor->textCursor();
+    draft.cursorLine = cursor.blockNumber() + 1;      // 1 起算，和全项目一致
+    draft.cursorColumn = cursor.positionInBlock() + 1;
+
+    // 内容取编辑器的当前正文 —— 这里不依赖 m_syncScheduler 是否已经同步进文档管理器，
+    // 因为草稿要的就是"此刻屏幕上有什么"，而不是"文档管理器里那份可能滞后 150ms 的"。
+    m_draftRecovery.store(draft, editor->toPlainText());
+}
+
+void MainWindow::storeAllDrafts()
+{
+    // 遍历所有标签，每个 dirty 的存一份。定时器（15s）和关窗口前都会调到这里。
+    for (int i = 0; i < ui->tabManager->count(); ++i) {
+        storeDraftFor(ui->tabManager->editorAt(i));
+    }
+}
+
+// 启动时问一次要不要恢复。只问一次（在 restoreSession 之前），用 QMessageBox 列出
+// 有草稿的文档；「恢复」逐个打开，「丢弃」全部清掉。这里刻意不做多选/逐个问 ——
+// 崩溃恢复的定位是"救命"，不是"精细管理"，两键把选择权交还用户就够了。
+void MainWindow::offerDraftRecovery()
+{
+    const QList<DraftRecovery::Draft> drafts = m_draftRecovery.pending();
+    if (drafts.isEmpty()) {
+        return;  // 没有草稿：不打扰
+    }
+
+    QStringList names;
+    for (const DraftRecovery::Draft &d : drafts) {
+        names << QStringLiteral("%1（%2）")
+                     .arg(d.displayName,
+                          d.savedAt.toString(QStringLiteral("MM-dd HH:mm:ss")));
+    }
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("恢复未保存的内容"));
+    box.setIcon(QMessageBox::Question);
+    box.setText(QStringLiteral("上次有 %1 个文档没保存就退出了：\n\n%2")
+                    .arg(drafts.size())
+                    .arg(names.join(QStringLiteral("\n"))));
+    QPushButton *restore = box.addButton(QStringLiteral("恢复"), QMessageBox::AcceptRole);
+    QPushButton *discard = box.addButton(QStringLiteral("丢弃"), QMessageBox::DestructiveRole);
+    Q_UNUSED(discard);
+    box.exec();
+
+    if (box.clickedButton() == restore) {
+        for (const DraftRecovery::Draft &d : drafts) {
+            QString content;
+            QString error;
+            // 读草稿正文（FileUtils::readFile 已在 DraftRecovery 内部做容错，这里再兜一层）
+            QFile file(d.contentPath);
+            if (!file.open(QIODevice::ReadOnly)) {
+                continue;  // 正文读不出来就跳过这条（不崩、不卡恢复流程）
+            }
+            content = QString::fromUtf8(file.readAll());
+            file.close();
+
+            if (d.documentPath.isEmpty()) {
+                // 新建未保存的文档：开一个空标签然后把草稿内容放进去
+                EditorWidget *editor = createSession();
+                if (editor != nullptr) {
+                    editor->setPlainText(content);
+                    editor->goToLine(d.cursorLine, d.cursorColumn);
+                }
+            } else if (openFile(d.documentPath)) {
+                // 有路径的：正常打开，然后用草稿内容覆盖，再跳到草稿记的光标位置
+                if (EditorWidget *editor = currentEditor()) {
+                    editor->setPlainText(content);
+                    editor->goToLine(d.cursorLine, d.cursorColumn);
+                }
+            }
+            m_draftRecovery.discard(d.key());
+        }
+    } else {
+        m_draftRecovery.discardAll();
     }
 }
 
@@ -1877,24 +2008,46 @@ void MainWindow::onDiffWithPrevious()
         return;
     }
 
-    // 界面暂时还是"显示一段文本"，所以在这里把结构化结果转回 unified 文本。
-    // 有了结构之后，换成"按块渲染 + 高亮"只是这一步的事，算法那边不用再动。
+    // ★ #9：不再把结构化结果压回一段 unified 文本，而是直接交给 DiffView 做行级红绿着色。
+    // 双击某一"新"行会跳回编辑器对应行 —— 结构化 diff 的价值在这里兑现：按块渲染、能跳转。
     const QStringList oldLines = LineDiff::splitLines(history->contentOf(repoDir, previous.hash));
     const QStringList newLines = LineDiff::splitLines(history->contentOf(repoDir, newest.hash));
-    const QString diffText = LineDiff::toUnifiedText(localDiff, oldLines, newLines, 3);
 
-    showTextDialog(
-        QStringLiteral("与上一版对比 — %1").arg(files->fileName()),
-        QStringLiteral("%1（%2） → %3（%4）\n"
-                       "- 开头是上一版的内容，+ 开头是这一版新增的内容\n"
-                       "（共 %5 行新增、%6 行删除，由自研行级 diff 计算）")
+    auto *view = new DiffView(this);
+    view->setDiff(localDiff, oldLines, newLines);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("与上一版对比 — %1").arg(files->fileName()));
+    auto *lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(0, 0, 0, 0);
+
+    // 标题区：上一版 → 这一版 + 增删行数，和原来的 showTextDialog 说明保持一致。
+    auto *header = new QLabel(
+        QStringLiteral("%1（%2） → %3（%4）　共 %5 行新增、%6 行删除（双击某一行跳到编辑器对应位置）")
             .arg(previous.shortHash,
                  previous.time.toString(QStringLiteral("MM-dd HH:mm:ss")),
                  newest.shortHash,
                  newest.time.toString(QStringLiteral("MM-dd HH:mm:ss")))
             .arg(localDiff.insertedLines)
             .arg(localDiff.deletedLines),
-        diffText.isEmpty() ? QStringLiteral("（两个版本的内容完全相同）") : diffText);
+        &dlg);
+    header->setWordWrap(true);
+    header->setContentsMargins(8, 8, 8, 4);
+    lay->addWidget(header);
+    lay->addWidget(view);
+
+    // 双击跳编辑器：只处理"有新行号"的（纯删除行发 -1，直接忽略）。
+    connect(view, &DiffView::lineActivated, this, [this](int newLine) {
+        if (newLine <= 0) {
+            return;
+        }
+        if (EditorWidget *editor = currentEditor()) {
+            editor->goToLine(newLine);
+        }
+    });
+
+    dlg.resize(760, 520);
+    dlg.exec();
 }
 
 // 回滚：把某个历史版本的内容载入编辑器。
@@ -2244,9 +2397,10 @@ void MainWindow::updateCacheStatus()
     const qint64 lookups = cache->hits() + cache->misses() + cache->staleCount();
     const double hitRate = lookups > 0 ? (100.0 * double(cache->hits()) / double(lookups)) : 0.0;
 
-    m_cacheLabel->setText(QStringLiteral("缓存 %1/%2 条 · 命中 %3/%4（%5%）")
+    // #8：状态栏从"条数"升级为"字节量"—— 能直接看到缓存吃了多少内存。
+    m_cacheLabel->setText(QStringLiteral("缓存 %1 条 · %2 KB · 命中 %3/%4（%5%）")
                               .arg(cache->size())
-                              .arg(cache->maxEntries())
+                              .arg(double(cache->currentBytes()) / 1024.0, 0, 'f', 0)
                               .arg(cache->hits())
                               .arg(lookups)
                               .arg(hitRate, 0, 'f', 0));
@@ -2544,6 +2698,10 @@ void MainWindow::saveSession() const
 // 关窗口：**每个**有未保存修改的标签都问一遍。
 // 和关标签共用 maybeSave()，保证两种入口的行为完全一致 ——
 // 少这一处的话，用户点右上角关闭就会把没保存的内容丢掉。
+//
+// ★ #16 关闭路径对称化：和启动的"两阶段"对应，关闭也分两段 ——
+//   先同步关键数据（编辑内容 flush + 草稿落盘），再让窗口走完关闭流程。
+//   这样做保证了"秒开秒关"：窗口先消失，后台的索引 flush / 缓存清理不挡在关闭上。
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     for (int i = 0; i < ui->tabManager->count(); ++i) {
@@ -2552,6 +2710,15 @@ void MainWindow::closeEvent(QCloseEvent *event)
             return;
         }
     }
+
+    // ---- 关键数据落盘（不能丢的那部分）----
+    // ① 把 150ms 内还没同步进文档管理器的编辑内容立刻同步过去。
+    //    放在 maybeSave 之后：maybeSave 里已经问过"要不要保存"，这里补的是
+    //    "保存被用户点取消 / 放弃"之后仍然要留一份草稿，关窗口也不丢内容。
+    m_syncScheduler.flushAll();
+    // ② 草稿立刻落盘（storeAllDrafts 内部只写 dirty 的标签，已保存的不会多写）。
+    storeAllDrafts();
+    m_draftTimer.stop();  // 要关了，定时器别再来一次
 
     // 真的要关了：把窗口几何 + 这次打开的文件记下来（下次启动恢复）。
     // 放在"用户没取消"之后：取消关闭时不该把状态写进去，否则下次启动会恢复一个

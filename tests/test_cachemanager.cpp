@@ -88,14 +88,15 @@ int main(int argc, char *argv[])
     {
         CacheManager cache;
         check(cache.size() == 0, QStringLiteral("新建: 缓存为空"));
-        check(cache.maxEntries() == CacheManager::kDefaultMaxEntries,
-              QStringLiteral("新建: 默认条数上限"),
-              QString::number(cache.maxEntries()));
+        check(cache.maxBytes() == CacheManager::kDefaultMaxBytes,
+              QStringLiteral("新建: 默认字节预算"),
+              QString::number(cache.maxBytes()));
 
         check(cache.insert(pathA, entryFor(pathA, QStringLiteral("甲文件内容\n"))),
               QStringLiteral("insert: 存入成功"));
         check(cache.size() == 1 && cache.contains(pathA), QStringLiteral("insert: 条数与 contains 都对"));
         check(cache.keys().size() == 1, QStringLiteral("keys: 列出缓存里的路径"));
+        check(cache.currentBytes() > 0, QStringLiteral("currentBytes: 有内容时字节数 > 0"));
 
         CacheManager::Entry got;
         check(cache.lookup(pathA, QFileInfo(pathA), &got) == CacheManager::LookupResult::Hit,
@@ -103,6 +104,7 @@ int main(int argc, char *argv[])
         check(got.text == QStringLiteral("甲文件内容\n") && got.encoding == Encoding::Utf8,
               QStringLiteral("lookup: 内容和编码都取回来了"));
         check(cache.hits() == 1 && cache.misses() == 0, QStringLiteral("统计: 命中 1 次"));
+        check(cache.savedReads() == 1, QStringLiteral("统计: 命中 1 次 = 省 1 次磁盘读（savedReads）"));
 
         got.text.clear();
         check(cache.lookup(pathB, QFileInfo(pathB), &got) == CacheManager::LookupResult::Miss,
@@ -112,7 +114,9 @@ int main(int argc, char *argv[])
 
     // ============================ LRU 淘汰（核心）============================
     {
-        CacheManager cache(2);  // 最多两条
+        // 字节预算：给 3 条各 1 字节的记录留够空间，但只够放 2 条 ——
+        // 用 2 字节预算 + 每条内容 1 字节，复现原来"最多 2 条"的 LRU 语义。
+        CacheManager cache(2);  // 总预算 2 字节
 
         check(cache.insert(pathA, entryFor(pathA, QStringLiteral("A"))), QStringLiteral("LRU: 存入 A"));
         check(cache.insert(pathB, entryFor(pathB, QStringLiteral("B"))), QStringLiteral("LRU: 存入 B"));
@@ -122,11 +126,12 @@ int main(int argc, char *argv[])
         CacheManager::Entry got;
         cache.lookup(pathA, QFileInfo(pathA), &got);
 
-        check(cache.insert(pathC, entryFor(pathC, QStringLiteral("C"))), QStringLiteral("LRU: 再存入 C（超出上限）"));
-        check(cache.size() == 2, QStringLiteral("LRU: 条数仍然等于上限"));
+        check(cache.insert(pathC, entryFor(pathC, QStringLiteral("C"))), QStringLiteral("LRU: 再存入 C（超出预算）"));
+        check(cache.size() == 2, QStringLiteral("LRU: 条数仍然等于预算能放下的条数"));
         check(cache.contains(pathA), QStringLiteral("LRU: 刚访问过的 A 还在（★证明是 LRU 不是 FIFO）"));
         check(!cache.contains(pathB), QStringLiteral("LRU: 最久未使用的 B 被淘汰"));
         check(cache.evictions() >= 1, QStringLiteral("统计: 记了一次淘汰"));
+        check(cache.evictedBytes() > 0, QStringLiteral("统计: 淘汰时记下了释放的字节数（evictedBytes）"));
     }
 
     // ============================ 过期判断 ============================
@@ -158,15 +163,15 @@ int main(int argc, char *argv[])
               QStringLiteral("过期: 命中时拿到的是新内容"));
     }
 
-    // ============================ 两条容量约束 ============================
+    // ============================ 字节预算 + 单条上限 ============================
     {
         CacheManager cache(0);  // 关掉缓存
         check(!cache.insert(pathA, entryFor(pathA, QStringLiteral("x"))),
-              QStringLiteral("上限 0: 插入被拒（等于关掉缓存）"));
-        check(cache.size() == 0 && cache.rejections() == 1, QStringLiteral("上限 0: 条数保持 0 并记一次拒绝"));
+              QStringLiteral("预算 0: 插入被拒（等于关掉缓存）"));
+        check(cache.size() == 0 && cache.rejections() == 1, QStringLiteral("预算 0: 条数保持 0 并记一次拒绝"));
 
-        cache.setMaxEntries(5);
-        check(cache.insert(pathA, entryFor(pathA, QStringLiteral("x"))), QStringLiteral("上限 0: 调大之后能存了"));
+        cache.setMaxBytes(1024);  // 调大到 1KB
+        check(cache.insert(pathA, entryFor(pathA, QStringLiteral("x"))), QStringLiteral("预算 0: 调大之后能存了"));
 
         // 单条大小上限（用伪造的 size 来测，不用真的造大文件）
         cache.setMaxEntryBytes(10);
@@ -182,6 +187,55 @@ int main(int argc, char *argv[])
         cache.setMaxEntryBytes(0);
         big.size = 1024 * 1024 * 100;  // 100MB
         check(cache.insert(pathC, big), QStringLiteral("单条上限: 设为 0 表示不限制单条大小"));
+    }
+
+    // ============================ 按字节配额淘汰（#8）============================
+    // 新模型的核心：淘汰按"内存量"走，一个大文件占的预算 = 很多个小文件。
+    // 这里验证"一个 900KB 大文件 + 预算 1MB"时，再塞一个小文件会挤掉谁。
+    {
+        // 预算 1 MiB。一个大文件（900KB）先进来，再进两个小文件时，大文件会被淘汰。
+        CacheManager cache(CacheManager::kDefaultMaxEntryBytes);  // 1 MiB 预算
+
+        CacheManager::Entry big = entryFor(pathA, QStringLiteral("大文件"));
+        big.text = QString(900 * 1024, QLatin1Char('A'));  // 900KB 内容
+        big.size = big.text.size();
+        check(cache.insert(pathA, big), QStringLiteral("字节配额: 900KB 大文件能进 1MB 预算"));
+
+        // 再塞两个 100KB 的文件，总字节会超预算 → 触发按字节淘汰
+        CacheManager::Entry m1 = entryFor(pathB, QStringLiteral("中文件1"));
+        m1.text = QString(100 * 1024, QLatin1Char('B'));
+        m1.size = m1.text.size();
+        CacheManager::Entry m2 = entryFor(pathC, QStringLiteral("中文件2"));
+        m2.text = QString(100 * 1024, QLatin1Char('C'));
+        m2.size = m2.text.size();
+
+        cache.insert(pathB, m1);
+        cache.insert(pathC, m2);
+
+        // 900 + 100 + 100 = 1100KB > 1024KB，必然有人被淘汰。
+        // 关键断言：大文件（最占内存的）最容易被挤掉，而不是按条数平均对待。
+        check(cache.currentBytes() <= cache.maxBytes(),
+              QStringLiteral("字节配额: 淘汰后总字节不超预算"),
+              QStringLiteral("当前 %1 / 预算 %2").arg(cache.currentBytes()).arg(cache.maxBytes()));
+        check(cache.evictedBytes() > 0, QStringLiteral("字节配额: 淘汰释放了字节（evictedBytes 有值）"));
+    }
+
+    // ============================ 文件大小分桶（#8）============================
+    {
+        check(CacheManager::tierOf(0) == CacheManager::Tier::Small,
+              QStringLiteral("分桶: 0 字节归 Small"));
+        check(CacheManager::tierOf(64 * 1024) == CacheManager::Tier::Small,
+              QStringLiteral("分桶: 恰好 64KB 归 Small"));
+        check(CacheManager::tierOf(64 * 1024 + 1) == CacheManager::Tier::Medium,
+              QStringLiteral("分桶: 64KB+1 归 Medium"));
+        check(CacheManager::tierOf(512 * 1024) == CacheManager::Tier::Medium,
+              QStringLiteral("分桶: 恰好 512KB 归 Medium"));
+        check(CacheManager::tierOf(512 * 1024 + 1) == CacheManager::Tier::Large,
+              QStringLiteral("分桶: 512KB+1 归 Large"));
+        check(CacheManager::tierOf(1024 * 1024) == CacheManager::Tier::Large,
+              QStringLiteral("分桶: 恰好 1MB 归 Large"));
+        check(CacheManager::tierOf(5 * 1024 * 1024) == CacheManager::Tier::Large,
+              QStringLiteral("分桶: 5MB 归 Large（超过单条上限，会被拒，但仍属 Large 档）"));
     }
 
     // ============================ 删除 / 清空 / 覆盖 ============================

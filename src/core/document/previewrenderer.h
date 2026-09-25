@@ -136,6 +136,23 @@ public:
     // 抽成 static 纯函数（不碰页面、不要事件循环）是为了能单独测这条序列化契约。
     static QString buildApplyScript(const QString &html, const QList<int> &lineMap);
 
+    // ---- 增量刷新（#2）：改动检测，纯函数、能单独测 ----
+    // 计算"从 oldMarkdown 到 newMarkdown"的改动规模，供降级闸门判断。
+    // 返回结构里：changedLines = 增删总行数；changedBlockRatio = 改动覆盖的块数 / 总块数
+    //（块切分复用 ParseCache::splitBlocks）。degraded 表示 diff 已经放弃逐行对齐。
+    // 降级闸门（写在这里，是策略而非魔法数）：changedBlockRatio > kIncrementalMaxBlockRatio
+    // 或 degraded 时，调用方应回退整页 applyContent —— 增量只在改动足够小的时候才划算。
+    struct ChangeStats
+    {
+        int changedLines = 0;      // 增删总行数
+        double changedBlockRatio = 0.0;  // 0..1，改动覆盖的块占比
+        bool degraded = false;     // diff 降级（改动太大，放弃逐行对齐）
+    };
+    static ChangeStats computeChangeStats(const QString &oldMarkdown, const QString &newMarkdown);
+
+    // 改动块占比超过这个阈值就回退整页（增量只在改动小的时候才划算，否则 patch 反而更慢）。
+    static constexpr double kIncrementalMaxBlockRatio = 0.30;
+
     // 文档目录 → 页面 baseUrl。空目录 = about:blank；
     // 非空则补上结尾的 '/' 再转成 file:// URL（缺了结尾斜杠的话，
     // "a.png" 会被当成上一级目录里的文件）。
@@ -180,6 +197,10 @@ private:
 
     QString m_desired;  // 最近一次被要求渲染的内容（页面就绪后补推的就是它）
     bool m_ready = false;
+
+    // 最近一次**真的推给页面**的 Markdown（#2：增量刷新用它算改动规模 + 内容相同短路）。
+    // 注意它和 m_desired 不同：m_desired 是"被要求渲染的"，m_lastPushed 是"已经渲染出去的"。
+    QString m_lastPushed;
 
     // 最近一次载模板用的目录：渲染进程崩了要照原样重载（baseUrl 不能丢，
     // 否则重载后文档里的相对路径图片会找不到）。

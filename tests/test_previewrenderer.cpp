@@ -329,6 +329,43 @@ int main(int argc, char *argv[])
         check(!renderer.hasPendingUpdate(), QStringLiteral("防抖: 停手之后才渲染一次"));
     }
 
+    // ============================ #2 增量刷新：改动规模检测 ============================
+    {
+        // 10 个段落里改 1 个 → 改动行数小、覆盖块比例 1/10 = 10%（低于阈值，增量划算）
+        QStringList parts;
+        for (int i = 1; i <= 10; ++i) {
+            parts << QStringLiteral("第 %1 段原文").arg(i);
+        }
+        const QString oldText = parts.join(QStringLiteral("\n\n")) + QStringLiteral("\n");
+        QStringList partsNew = parts;
+        partsNew[4] = QStringLiteral("第 5 段改后");  // 改第 5 段（中间那个）
+        const QString newText = partsNew.join(QStringLiteral("\n\n")) + QStringLiteral("\n");
+
+        const PreviewRenderer::ChangeStats small = PreviewRenderer::computeChangeStats(oldText, newText);
+        check(small.changedLines == 2, QStringLiteral("增量检测: 改一行 = 删 1 增 1（共 2 行）"),
+              QStringLiteral("改动 %1 行").arg(small.changedLines));
+        check(!small.degraded, QStringLiteral("增量检测: 小改动不降级"));
+        check(small.changedBlockRatio <= PreviewRenderer::kIncrementalMaxBlockRatio,
+              QStringLiteral("增量检测: 改 1/10 块，比例低于阈值（走增量）"),
+              QStringLiteral("覆盖 %1%").arg(int(small.changedBlockRatio * 100)));
+
+        // 内容完全没变 → 0 行改动、0 块覆盖
+        const PreviewRenderer::ChangeStats same = PreviewRenderer::computeChangeStats(oldText, oldText);
+        check(same.changedLines == 0 && same.changedBlockRatio == 0.0 && !same.degraded,
+              QStringLiteral("增量检测: 内容没变 → 零改动"));
+
+        // 全文大改 → 覆盖块比例高（会触发降级闸门回退整页）
+        QStringList allNew;
+        for (int i = 1; i <= 10; ++i) {
+            allNew << QStringLiteral("全新的第 %1 段").arg(i);
+        }
+        const QString fullNew = allNew.join(QStringLiteral("\n\n")) + QStringLiteral("\n");
+        const PreviewRenderer::ChangeStats big = PreviewRenderer::computeChangeStats(oldText, fullNew);
+        check(big.changedBlockRatio > PreviewRenderer::kIncrementalMaxBlockRatio,
+              QStringLiteral("增量检测: 全文改 → 覆盖块比例超阈值（回退整页）"),
+              QStringLiteral("覆盖 %1%").arg(int(big.changedBlockRatio * 100)));
+    }
+
     if (g_fail == 0) {
         std::printf("\n=== PreviewRenderer 契约测试：全部通过 ===\n");
     } else {

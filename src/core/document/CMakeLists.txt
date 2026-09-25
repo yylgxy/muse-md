@@ -21,6 +21,8 @@ add_library(core_document STATIC
     textstats.cpp
     linediff.h
     linediff.cpp
+    parsecache.h
+    parsecache.cpp
     previewrenderer.h
     previewrenderer.cpp
 )

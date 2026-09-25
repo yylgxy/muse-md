@@ -13,6 +13,7 @@
 #include "findreplacedialog.h"  // 查找/替换对话框是窗口的一个成员（按值持有）
 #include "fulltextsearch.h"     // C1：onSearchResultActivated(SearchHit) 的签名里用到它
 #include "editorsyncscheduler.h"  // 性能（P0-1）：编辑器 → 文档的延迟同步节流器
+#include "draftrecovery.h"        // A3：崩溃恢复草稿（按值持有，关窗口/定时落盘用）
 #include "recentfiles.h"        // 5.4.2 的最近文件列表是整个窗口的一个成员（按值持有）
 #include "sessionstate.h"       // 6.2：窗口/会话记忆（静态工具类）
 #include "thememanager.h"       // 5.7：主题（槽签名里用它的枚举）
@@ -266,10 +267,27 @@ private:
     // 所以绝不会"保存到旧内容"。
     EditorSyncScheduler m_syncScheduler;
 
+    // ============================ 崩溃恢复草稿（A3）============================
+    // 草稿恢复器（按值持有，和 RecentFiles / Exporter 一致的风格）：它不认识界面，
+    // 只负责"路径 + 内容 + 光标"的原子落盘与读回。本窗口决定**什么时候**存/查/删。
+    markdown_editor::core::storage::DraftRecovery m_draftRecovery;
+    // 草稿定时器（15 秒，VeryCoarseTimer）：没保存的内容定期落盘，崩了也能找回。
+    // 和启动对称：启动是"先显示再补非核心活"，关闭是"先落盘关键数据再让窗口走"。
+    QTimer m_draftTimer;
+
     // ============================ 启动与性能（7.2）============================
     // 构造函数只做"让窗口能出现"的那部分；文件树开始监听目录、恢复上次会话
     // 这些都排到事件循环的下一轮（用户先看到窗口，再看文件一个个出现）。
     void finishStartup();
+
+    // ============================ 崩溃恢复草稿（A3 / #16）============================
+    // 只存"有未保存修改"的那一个编辑器的草稿。
+    // 内容取 editor 的当前正文、光标取 textCursor()，路径/名字来自它的 FileManager。
+    void storeDraftFor(EditorWidget *editor);
+    // 把**所有**有未保存修改的标签各存一份草稿（关窗口前调）。
+    void storeAllDrafts();
+    // 启动时问一次"要不要恢复草稿"（有草稿才弹窗；恢复/丢弃都是显式选择）。
+    void offerDraftRecovery();
 
     // ============================ 窗口记忆（6.2）============================
     // 启动时恢复：窗口几何 + 上次打开的文件（磁盘上没了的跳过）+ 面板可见性
