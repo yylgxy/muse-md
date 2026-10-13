@@ -8,7 +8,7 @@ add_executable(MarkdownEditor WIN32
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
 
-# 把 CMake 里 project(... VERSION 1.0.0) 的版本号传给代码，日志启动横幅里会打出来
+# 把 CMake 里 project(... VERSION 1.1.0) 的版本号传给代码，日志启动横幅里会打出来
 target_compile_definitions(MarkdownEditor PRIVATE APP_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(MarkdownEditor ui infrastructure)

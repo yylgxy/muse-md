@@ -2464,7 +2464,7 @@ void MainWindow::onAbout()
         this,
         QStringLiteral("关于 muse-md"),
         QStringLiteral("<h3>muse-md %1</h3>"
-                       "<p>一个用 Qt 6 + C++17 写的 Markdown 编辑器，带实时双向预览、"
+                       "<p>一个用 Qt 6 + C++17 写的 Markdown 编辑器，带实时预览、"
                        "本地版本历史、全文搜索、代码高亮与亮暗主题。</p>"
                        "<p><b>关于：</b>%2<br/>"
                        "<b>Qt：</b>%3（运行时 %4）<br/>"

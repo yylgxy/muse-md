@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(MarkdownEditor VERSION 1.0.0 LANGUAGES CXX C)   # 需要 C：third_party/md4c 是纯 C 库
+project(MarkdownEditor VERSION 1.1.0 LANGUAGES CXX C)   # 需要 C：third_party/md4c 是纯 C 库
 
 # C++17 标准 + Qt 自动编译开关
 set(CMAKE_CXX_STANDARD 17)
